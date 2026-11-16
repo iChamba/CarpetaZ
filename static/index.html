@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Documentos locales</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <h1>Documentos locales</h1>
+      <p>Explorar, buscar y revisar archivos en una carpeta</p>
+    </div>
+    <div class="index-status" id="index-status" role="status">Comprobando índice…</div>
+  </header>
+
+  <nav class="tabs" aria-label="Secciones">
+    <button class="tab active" data-tab="users">Usuarios</button>
+    <button class="tab" data-tab="search">Buscar en PDF</button>
+    <button class="tab" data-tab="records">Datos extraídos</button>
+    <button class="tab" data-tab="workbooks">Editar Excel</button>
+  </nav>
+
+  <main>
+    <section class="pane active" id="pane-users">
+      <div class="section-heading">
+        <div>
+          <h2>Usuarios</h2>
+          <p>Cada carpeta de primer nivel representa un usuario. Importa los datos de sus documentos por separado.</p>
+        </div>
+        <form id="user-filter" class="inline-form">
+          <input id="user-query" type="search" placeholder="Buscar usuario" aria-label="Buscar usuario">
+          <button type="submit" class="button primary">Buscar</button>
+          <button type="button" class="button secondary" id="import-certificates">
+            Importar certificados de todos
+          </button>
+        </form>
+      </div>
+      <div class="user-filters" aria-label="Filtros de usuarios">
+        <label>
+          Autorización
+          <select id="user-authorization-filter">
+            <option value="all">Todas</option>
+            <option value="with">Con autorización</option>
+            <option value="without">Sin autorización</option>
+          </select>
+        </label>
+        <label>
+          Estado
+          <select id="user-status-filter">
+            <option value="">Todos los estados</option>
+            <option value="expired">Vencida</option>
+            <option value="soon">Próxima a vencerse</option>
+            <option value="valid">Vigente</option>
+            <option value="unknown">Sin fecha de vencimiento</option>
+            <option value="pending">Pendiente de importar</option>
+          </select>
+        </label>
+        <label>
+          Práctica
+          <input id="user-practice-filter" type="search" placeholder="Ej.: tomografía, radioterapia" aria-label="Filtrar por práctica">
+        </label>
+      </div>
+      <div class="notice" id="user-message" role="status"></div>
+      <div class="user-layout">
+        <aside class="user-directory">
+          <h3>Carpetas</h3>
+          <div id="user-list" class="user-list"></div>
+        </aside>
+        <section id="user-profile" class="user-profile empty-state" aria-live="polite">
+          Selecciona una carpeta para abrir la ficha del usuario.
+        </section>
+      </div>
+    </section>
+
+    <section class="pane" id="pane-search">
+      <div class="section-heading">
+        <div>
+          <h2>Buscar dentro de PDF</h2>
+          <p>Busca palabras o números en el texto seleccionable de los PDF.</p>
+        </div>
+        <button id="rebuild-index" class="button secondary">Actualizar índice</button>
+      </div>
+      <form id="pdf-search-form" class="search-form">
+        <input id="pdf-query" type="search" maxlength="200" placeholder="Ej.: apellido, cédula o número de autorización" required>
+        <button type="submit" class="button primary">Buscar</button>
+      </form>
+      <div class="notice" id="search-message" role="status"></div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Archivo</th><th>Coincidencia</th><th>Acciones</th></tr></thead>
+          <tbody id="search-rows"></tbody>
+        </table>
+      </div>
+      <aside class="preview-panel search-preview-panel">
+        <div class="preview-title">
+          <h3 id="search-preview-title">Vista previa</h3>
+          <a id="search-download-link" class="button secondary hidden" href="#">Descargar</a>
+        </div>
+        <div id="search-preview-content" class="preview-content empty-state">
+          Selecciona un resultado para verlo aquí.
+        </div>
+      </aside>
+    </section>
+
+    <section class="pane" id="pane-records">
+      <div class="section-heading">
+        <div>
+          <h2>Datos extraídos</h2>
+          <p>Revisa y corrige los campos antes de exportar. Los candidatos automáticos pueden requerir corrección.</p>
+        </div>
+        <div class="actions">
+          <button id="records-refresh" class="button secondary">Actualizar lista</button>
+          <a class="button primary" href="/api/records/export">Exportar a Excel (.xlsx)</a>
+        </div>
+      </div>
+      <div class="notice" id="records-message" role="status"></div>
+      <div id="records-summary" class="records-summary" aria-label="Resumen de autorizaciones"></div>
+      <div class="table-wrap records-scroll-wrap">
+        <table class="records-table">
+          <thead>
+            <tr>
+              <th>Usuario</th><th>Documento de origen</th><th>Nombre</th><th>Cédula</th>
+              <th>N.º autorización</th><th>Práctica</th><th>Expedición</th><th>Vencimiento</th>
+              <th>Equipos asociados</th><th></th>
+            </tr>
+          </thead>
+          <tbody id="record-rows"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="pane" id="pane-workbooks">
+      <div class="section-heading">
+        <div>
+          <h2>Editar Excel</h2>
+          <p>Se editan libros .xlsx de la carpeta configurada. Cada guardado crea una copia de respaldo local.</p>
+        </div>
+      </div>
+      <div class="workbook-controls">
+        <label>Libro
+          <select id="workbook-select"><option value="">Cargando…</option></select>
+        </label>
+        <button id="workbook-reveal" class="button secondary" disabled>Ver en carpeta</button>
+        <label>Hoja
+          <select id="sheet-select" disabled></select>
+        </label>
+        <button id="workbook-reload" class="button secondary" disabled>Recargar</button>
+        <button id="workbook-save" class="button primary" disabled>Guardar cambios</button>
+      </div>
+      <div class="notice" id="workbook-message" role="status"></div>
+      <div class="pagination">
+        <span id="workbook-page-label"></span>
+        <div>
+          <button class="button secondary" id="workbook-prev" disabled>Filas anteriores</button>
+          <button class="button secondary" id="workbook-next" disabled>Filas siguientes</button>
+        </div>
+      </div>
+      <div class="table-wrap workbook-wrap">
+        <table id="workbook-grid"></table>
+      </div>
+    </section>
+  </main>
+  <script type="module" src="/js/main.js"></script>
+</body>
+</html>

@@ -1,0 +1,4 @@
+.venv/
+appdata/
+__pycache__/
+tests/__pycache__/
