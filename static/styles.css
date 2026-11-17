@@ -204,6 +204,8 @@ tr:last-child td { border-bottom: 0; }
 .user-directory { align-self: start; padding: 12px; }
 .user-directory h3 { margin: 0 0 10px; font-size: 1rem; }
 .user-list { display: grid; gap: 6px; max-height: 68vh; overflow: auto; }
+.user-list-pagination { display: flex; align-items: center; justify-content: space-between; gap: 6px; margin-top: 10px; color: #64748b; font-size: .78rem; }
+.user-list-pagination > div { display: flex; gap: 4px; }
 .user-list-item { display: grid; gap: 4px; width: 100%; padding: 9px; border: 1px solid transparent; border-radius: 6px; color: #243248; background: #f8fafc; text-align: left; cursor: pointer; }
 .user-list-item:hover, .user-list-item.active { border-color: #93c5fd; background: #eff6ff; }
 .user-list-name { overflow-wrap: anywhere; font-weight: 650; }
@@ -217,11 +219,14 @@ tr:last-child td { border-bottom: 0; }
 .user-profile.empty-state { display: grid; place-items: center; color: #94a3b8; }
 .user-profile-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 16px; }
 .user-profile-heading h3 { margin: 0; overflow-wrap: anywhere; font-size: 1.15rem; }
+.entity-name-line { display: flex; align-items: baseline; flex-wrap: wrap; gap: 8px; }
+.entity-profile-location { color: #64748b; font-size: .9rem; font-weight: 500; }
 .user-profile-heading p { margin: 0; color: #64748b; font-size: .88rem; }
 .user-profile h4 { margin: 18px 0 8px; }
 .authorization-section { margin: 12px 0 22px; }
 .authorization-section-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
 .authorization-section-heading h4 { margin: 0; }
+.authorization-previous-toggle { margin: 0 0 10px; }
 .authorization-card {
   margin-bottom: 10px;
   padding: 16px;
@@ -253,12 +258,54 @@ tr:last-child td { border-bottom: 0; }
 .authorization-equipment { display: grid; gap: 6px; margin: 0; padding-left: 20px; }
 .authorization-equipment li { overflow-wrap: anywhere; }
 .authorization-source { overflow-wrap: anywhere; color: #64748b; font-size: .8rem; }
+.entity-license-cards { margin: 10px 0 14px; }
+.entity-license-cards .authorization-previous { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 12px; }
+.entity-license-cards .authorization-previous.hidden { display: none; }
 .authorization-warning { color: #92400e !important; font-size: .85rem; }
 .user-records-wrap, .user-files-wrap { max-height: 36vh; }
 .user-records-wrap table { min-width: 1320px; }
 .user-files-wrap table { min-width: 720px; }
 .user-file-path, .equipment-cell { max-width: 340px; overflow-wrap: anywhere; white-space: pre-wrap; }
 .empty-list { color: #64748b; font-size: .9rem; }
+.preview-browser-layout { display: grid; grid-template-columns: minmax(0, .95fr) minmax(0, 1.05fr); align-items: start; gap: 12px; }
+.preview-browser-layout.preview-hidden { grid-template-columns: minmax(0, 1fr); }
+.preview-browser-layout.preview-hidden > .preview-panel { display: none; }
+.preview-file-list { min-width: 0; max-height: 72vh; overflow: auto; padding: 10px; border: 1px solid #dce3ed; border-radius: 8px; background: #fff; }
+.preview-file-list > h4 { margin: 4px 0 10px; }
+.preview-file-list .user-files-wrap { max-height: none; }
+.preview-file-list .user-files-wrap table { min-width: 100%; table-layout: fixed; }
+.preview-file-list .user-files-wrap th:nth-child(1) { width: 26%; }
+.preview-file-list .user-files-wrap th:nth-child(2) { width: 6%; }
+.preview-file-list .user-files-wrap th:nth-child(3) { width: 11%; }
+.preview-file-list .user-files-wrap th:nth-child(4) { width: 12%; }
+.preview-file-list .user-files-wrap th:nth-child(5) { width: 14%; }
+.preview-file-list .user-files-wrap th:nth-child(6) { width: 31%; }
+.user-files-wrap th, .user-files-wrap td { padding: 3px 8px; font-size: .82rem; line-height: 1.25; }
+.user-files-wrap .button.small { min-height: 24px; padding: 2px 7px; font-size: .75rem; }
+.user-files-wrap .actions { gap: 3px; }
+.user-files-wrap .year-row .year-cell { padding: 0; border-top: 2px solid #000; background: #f1f5f9; }
+.user-files-wrap td:nth-child(2), .user-files-wrap td:nth-child(3), .user-files-wrap td:nth-child(4) { white-space: nowrap; }
+.user-files-wrap .user-file-path { max-width: 460px; }
+.user-files-wrap .year-toggle { width: 100%; padding: 5px 8px; border: 0; background: none; color: #0f172a; font: inherit; font-weight: 700; text-align: left; cursor: pointer; }
+.user-files-wrap .year-toggle:hover { background: #e2e8f0; }
+.preview-file-list .user-files-wrap td { overflow-wrap: anywhere; }
+.preview-file-list .user-files-wrap td:last-child { min-width: 0; }
+.preview-file-list .actions .button { min-width: 0; white-space: normal; overflow-wrap: anywhere; }
+.preview-file-list .entity-practice-group:first-child { margin-top: 0; }
+.preview-panel.user-preview-panel { position: sticky; top: 12px; min-width: 0; }
+.preview-panel.user-preview-panel .preview-content { height: min(68vh, 680px); }
+.entity-copy-note { margin: -8px 0 10px; color: #64748b; font-size: .86rem; }
+.entity-filters { display: flex; flex-wrap: wrap; gap: 12px; margin: -4px 0 12px; }
+.entity-filters label { display: grid; gap: 4px; min-width: 220px; color: #475569; font-size: .85rem; }
+.entity-practice-group { margin: 18px 0; padding: 14px; border: 1px solid #dce3ed; border-radius: 8px; background: #f8fafc; }
+.entity-practice-heading, .entity-area-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.entity-practice-heading h4, .entity-area-heading h5 { margin: 0; }
+.entity-area-location { color: #475569; font-size: .9rem; font-weight: 600; }
+.entity-area { margin-top: 12px; padding: 12px; border: 1px solid #e8edf4; border-radius: 6px; background: #fff; }
+.entity-area-heading { margin-bottom: 10px; }
+.entity-license-list { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0; }
+.entity-license-tag { padding: 5px 8px; border-radius: 5px; color: #174b84; background: #eaf2fc; font-weight: 650; }
+.entity-file-status { color: #64748b; }
 
 .workbook-controls { flex-wrap: wrap; margin: 10px 0; }
 .workbook-controls label { display: grid; gap: 4px; color: #64748b; font-size: .82rem; }
@@ -281,6 +328,7 @@ tr:last-child td { border-bottom: 0; }
   .inline-form { width: 100%; flex-wrap: wrap; }
   .inline-form input { flex: 1; }
   .user-filters { flex-wrap: wrap; }
+  .entity-filters label { flex: 1; }
 }
 
 @media (max-width: 640px) {
@@ -292,6 +340,10 @@ tr:last-child td { border-bottom: 0; }
   .inline-form select { flex: 1; }
   .user-filters label { flex: 1; }
   .user-filters select, .user-filters input { min-width: 0; width: 100%; }
+  .entity-filters label { min-width: 0; width: 100%; }
+  .entity-practice-heading, .entity-area-heading { align-items: flex-start; flex-direction: column; }
+  .preview-browser-layout { grid-template-columns: 1fr; }
+  .preview-panel.user-preview-panel { position: static; }
   .search-form { align-items: stretch; flex-direction: column; }
   .user-profile-heading { align-items: flex-start; flex-direction: column; }
   .authorization-card-heading { align-items: flex-start; flex-direction: column; }

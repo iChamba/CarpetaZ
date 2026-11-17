@@ -11,6 +11,7 @@ from openpyxl.worksheet.table import Table, TableStyleInfo
 
 from database import connect_db
 from documents import (
+    extract_legacy_doc_text,
     extract_pdf_text,
     parse_docx,
     safe_relative_path,
@@ -39,7 +40,7 @@ CERTIFICATE_IMPORT_STATE = {
     "error_details": [],
     "message": "Importación de certificados sin iniciar",
 }
-IMPORTABLE_DOCUMENT_EXTENSIONS = {".pdf", ".docx", ".txt"}
+IMPORTABLE_DOCUMENT_EXTENSIONS = {".pdf", ".doc", ".docx", ".txt"}
 
 
 def _save_extracted_record(relative: str, fields: dict[str, str], is_certificate: bool) -> dict:
@@ -187,6 +188,8 @@ def _certificate_import_worker() -> None:
                 extension = safe_path.suffix.lower()
                 if extension == ".pdf":
                     text = extract_pdf_text(safe_path)
+                elif extension == ".doc":
+                    text = extract_legacy_doc_text(safe_path)
                 elif extension == ".docx":
                     text = parse_docx(safe_path)
                 else:
@@ -275,6 +278,14 @@ class RecordRoutes:
                 if is_certificate
                 else extract_candidate_fields(text)
             )
+        elif extension == ".doc":
+            text = extract_legacy_doc_text(path)
+            is_certificate = is_authorization_individual(text)
+            fields = (
+                extract_certificate_fields(text, [])
+                if is_certificate
+                else extract_candidate_fields(text)
+            )
         elif extension == ".txt":
             text = path.read_text(encoding="utf-8-sig")
             is_certificate = is_authorization_individual(text)
@@ -284,7 +295,7 @@ class RecordRoutes:
                 else extract_candidate_fields(text)
             )
         else:
-            raise ValueError("La importación de datos está disponible para PDF, DOCX y TXT.")
+            raise ValueError("La importación de datos está disponible para PDF, DOC, DOCX y TXT.")
         if extension != ".pdf" and not text.strip():
             return self.send_error_json(
                 "Este archivo no contiene texto utilizable. Si es un PDF escaneado, se necesitaría OCR.",

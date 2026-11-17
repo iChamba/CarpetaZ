@@ -15,7 +15,7 @@ Aplicación web local para explorar una carpeta de documentos, buscar en el text
 
 ## Alcance actual
 
-- La ficha de cada usuario lista y previsualiza PDF, DOCX, TXT e imágenes JPG/JPEG/PNG sin cambiar de pestaña. Los `.doc` se pueden descargar, pero no previsualizar.
+- La ficha de cada usuario muestra la lista de documentos a la izquierda; el previsualizador a la derecha aparece al pulsar **Ver** y admite PDF, DOC, DOCX, TXT e imágenes JPG/JPEG/PNG. Los archivos Word 2003 `.doc` se leen usando Microsoft Word instalado localmente.
 - La acción **Ver en carpeta** abre el Explorador de Windows en el equipo que ejecuta la aplicación y selecciona el archivo en la carpeta compartida.
 - Busca palabras y números en PDF con texto seleccionable. La búsqueda divide consultas en términos y exige que todos aparezcan.
 - Presenta una lista de usuarios a partir de las carpetas de primer nivel. Cada ficha muestra sus documentos y los datos importados.
@@ -23,10 +23,12 @@ Aplicación web local para explorar una carpeta de documentos, buscar en el text
 - Presenta la autorización individual en una tarjeta con titular, cédula, número, práctica, fechas y equipos. Si no encuentra certificado, indica que el usuario no tiene una autorización individual y mantiene visible la lista de documentos.
 - La pestaña **Datos extraídos** muestra una fila por usuario con los datos de su autorización más reciente y un botón para verla; si no hay una autorización importada, permite abrir la carpeta del usuario. Incluye un resumen de estados y una tabla con desplazamiento horizontal.
 - Las pestañas conservan los datos ya cargados al cambiar entre ellas. **Datos extraídos** permite pedir una actualización manual cuando se necesite.
+- Las listas de usuarios e instituciones se muestran en páginas de hasta 100 elementos. Las fichas cargan hasta 100 documentos de usuario o 50 documentos por área de entidad, con controles para avanzar. En **Usuarios** o **Entidades usuarias**, usa **Actualizar catálogo** para detectar cambios en las carpetas compartidas.
 - Ordena las autorizaciones por fecha de expedición descendente. El estado de la autorización más nueva se calcula frente a la fecha local: vencida, próxima a vencer (hasta dos meses) o vigente.
-- Importa por separado candidatos de nombre, apellido, cédula, autorización y equipos desde PDF, DOCX y TXT. Para certificados `Certificado_Autorizacion_Individual_ARNR` y archivos de renovación de autorización individual, extrae los campos disponibles y conserva el número completo, incluidos sus contadores de renovación y modificación (por ejemplo, `0100/1/2`).
+- Importa por separado candidatos de nombre, apellido, cédula, autorización y equipos desde PDF, DOC, DOCX y TXT. Para certificados `Certificado_Autorizacion_Individual_ARNR` y archivos de renovación de autorización individual, extrae los campos disponibles y conserva el número completo, incluidos sus contadores de renovación y modificación (por ejemplo, `0100/1/2`).
 - Al importar un PDF, también reconoce una autorización individual por su contenido aunque el nombre del archivo no coincida; la ficha guarda esa clasificación y usa la autorización más reciente, comparando versión y fecha.
 - La pestaña **Usuarios** revisa en segundo plano los PDF, DOCX y TXT de cada usuario, detecta autorizaciones por nombre o contenido e importa o actualiza las encontradas. Muestra el progreso, los archivos sin texto y los errores.
+- La pestaña **Entidades usuarias** agrupa instituciones aunque aparezcan en varias áreas y permite filtrarlas por práctica, departamento y localidad opcional. Las carpetas numeradas dentro de un centro se tratan como divisiones internas, no como instituciones separadas. En la ficha, departamento y localidad aparecen junto al nombre, y las rutas de documentos se muestran relativas a la carpeta del centro. El previsualizador a la derecha aparece al pulsar **Ver**. Las licencias con formato `LO-X-XXXX-XXXX-XX` se asocian a la práctica; la revisión masiva procesa solo los documentos de la carpeta `1. Autorización` de cada institución. La extracción admite PDF, DOC, DOCX y TXT. Si la carpeta se está copiando, actualiza la lista y vuelve a procesar al terminar; estos datos se almacenan separados de los registros de usuarios.
 - Guarda los registros extraídos en una base SQLite local de la aplicación y los descarga como `.xlsx`.
 - Agrupa los registros y el Excel exportado por el primer nivel de carpeta, que se usa como identificador de usuario (por ejemplo, `USUARIOejemplo`).
 - Permite editar celdas de archivos `.xlsx`; crea una copia de respaldo antes de cada guardado y evita guardar si el libro cambió desde que se abrió.
@@ -44,6 +46,8 @@ La carpeta de primer nivel identifica al usuario; cada documento importado queda
 
 La carpeta indicada en `DOCUMENT_ROOT` es la fuente de archivos: la aplicación no copia ni mueve documentos. Las modificaciones de Excel sí se guardan en esa carpeta; en la prueba local, por eso debe ser una copia. Las copias de respaldo de Excel y la base de datos quedan dentro de `documentos_locales\appdata`.
 
+La carpeta de entidades se configura con `ENTITY_ROOT`. Si no se define, se usa `3 Entidades Usuarias` junto a la carpeta `documentos_locales`.
+
 Para ejecutar las pruebas incluidas, abre una terminal en esta carpeta y ejecuta `.venv\Scripts\python.exe -m unittest discover -s tests -v`.
 
 ## Uso desde varias PC
@@ -54,9 +58,9 @@ La autenticación usa el diálogo HTTP Basic del navegador. La contraseña se so
 
 El servidor opera con los permisos de Windows de la cuenta que lo ejecuta. Esa cuenta necesita permisos de lectura para listar, previsualizar y buscar, y permisos de escritura si se desea editar libros Excel.
 
-## Búsqueda e índice
+## Catálogo, búsqueda e índice
 
-Al iniciar, la aplicación indexa los PDF en segundo plano. Los cambios se detectan por tamaño y fecha de modificación. La primera indexación puede tardar según la cantidad de archivos; el estado aparece en la parte superior. Usa **Actualizar índice** si se agregaron, modificaron o eliminaron documentos y aún no se refleja el cambio.
+Al iniciar, la aplicación cataloga los archivos compatibles de documentos y entidades e indexa los PDF en segundo plano. Las vistas consultan ese catálogo local en vez de volver a recorrer las carpetas compartidas. El catálogo registra tamaño y fecha de modificación, y el índice PDF evita reextraer texto de archivos que no cambiaron. El primer escaneo puede tardar según la cantidad de archivos; el estado aparece en la parte superior. Usa **Actualizar catálogo** para reflejar cambios en las listas y **Actualizar índice** para volver a revisar los PDF.
 
 El índice y los datos extraídos son locales a esta instalación. No se envían a servicios externos. La búsqueda no realiza OCR.
 

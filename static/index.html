@@ -17,6 +17,7 @@
 
   <nav class="tabs" aria-label="Secciones">
     <button class="tab active" data-tab="users">Usuarios</button>
+    <button class="tab" data-tab="entities">Entidades usuarias</button>
     <button class="tab" data-tab="search">Buscar en PDF</button>
     <button class="tab" data-tab="records">Datos extraídos</button>
     <button class="tab" data-tab="workbooks">Editar Excel</button>
@@ -32,6 +33,7 @@
         <form id="user-filter" class="inline-form">
           <input id="user-query" type="search" placeholder="Buscar usuario" aria-label="Buscar usuario">
           <button type="submit" class="button primary">Buscar</button>
+          <button type="button" class="button secondary" id="user-refresh">Actualizar catálogo</button>
           <button type="button" class="button secondary" id="import-certificates">
             Importar certificados de todos
           </button>
@@ -67,9 +69,60 @@
         <aside class="user-directory">
           <h3>Carpetas</h3>
           <div id="user-list" class="user-list"></div>
+          <div class="user-list-pagination">
+            <span id="user-page-label"></span>
+            <div>
+              <button class="button secondary small" id="user-prev" disabled>Anterior</button>
+              <button class="button secondary small" id="user-next" disabled>Siguiente</button>
+            </div>
+          </div>
         </aside>
         <section id="user-profile" class="user-profile empty-state" aria-live="polite">
           Selecciona una carpeta para abrir la ficha del usuario.
+        </section>
+      </div>
+    </section>
+
+    <section class="pane" id="pane-entities">
+      <div class="section-heading">
+        <div>
+          <h2>Entidades usuarias</h2>
+          <p>Busca instituciones y explora sus documentos por práctica, departamento y localidad. Las divisiones numeradas de cada centro no aparecen como instituciones separadas. Cada licencia corresponde a una práctica.</p>
+        </div>
+        <form id="entity-filter" class="inline-form">
+          <input id="entity-query" type="search" placeholder="Buscar institución" aria-label="Buscar institución">
+          <button type="submit" class="button primary">Buscar</button>
+          <button type="button" class="button secondary" id="entity-refresh">Actualizar catálogo</button>
+          <button type="button" class="button primary" id="import-entity-licenses">Procesar licencias</button>
+        </form>
+      </div>
+      <div class="entity-filters" aria-label="Filtros de entidades">
+        <label>Práctica
+          <select id="entity-practice-filter"><option value="">Todas las prácticas</option></select>
+        </label>
+        <label>Departamento
+          <select id="entity-department-filter"><option value="">Todos los departamentos</option></select>
+        </label>
+        <label>Localidad
+          <select id="entity-locality-filter"><option value="">Todas las localidades</option></select>
+        </label>
+      </div>
+      <p class="entity-copy-note">Si todavía se están copiando archivos, actualiza la lista y vuelve a procesar las licencias cuando termine la copia.</p>
+      <div class="notice" id="entity-message" role="status"></div>
+      <div class="user-layout">
+        <aside class="user-directory">
+          <h3>Instituciones</h3>
+          <div id="entity-list" class="user-list"></div>
+          <div class="user-list-pagination">
+            <span id="entity-page-label"></span>
+            <div>
+              <button class="button secondary small" id="entity-prev" disabled>Anterior</button>
+              <button class="button secondary small" id="entity-next" disabled>Siguiente</button>
+            </div>
+          </div>
+        </aside>
+        <section id="entity-profile" class="user-profile empty-state" aria-live="polite">
+          Selecciona una institución para revisar sus documentos.
         </section>
       </div>
     </section>
@@ -117,6 +170,13 @@
       </div>
       <div class="notice" id="records-message" role="status"></div>
       <div id="records-summary" class="records-summary" aria-label="Resumen de autorizaciones"></div>
+      <div class="pagination">
+        <span id="records-page-label"></span>
+        <div>
+          <button class="button secondary" id="records-prev" disabled>Usuarios anteriores</button>
+          <button class="button secondary" id="records-next" disabled>Usuarios siguientes</button>
+        </div>
+      </div>
       <div class="table-wrap records-scroll-wrap">
         <table class="records-table">
           <thead>

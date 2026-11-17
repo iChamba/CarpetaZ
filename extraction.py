@@ -10,6 +10,53 @@ def normalized(value: str) -> str:
     return unicodedata.normalize("NFKC", value).strip()
 
 
+def extract_operation_license(text: str) -> str:
+    match = re.search(
+        r"\bLO\s*-\s*([A-Z0-9])\s*-\s*([A-Z0-9]{4})\s*-\s*"
+        r"([A-Z0-9]{4})\s*-\s*([A-Z0-9]{2})\b",
+        normalized(text),
+        re.IGNORECASE,
+    )
+    if not match:
+        return ""
+    return f"LO-{'-'.join(part.upper() for part in match.groups())}"
+
+
+def extract_license_details(text: str) -> dict[str, str]:
+    text = normalized(text)
+    representative = re.search(
+        r"^[ \t]*representante\s+legal[ \t]*:[ \t]*([^\r\n]+)",
+        text,
+        re.IGNORECASE | re.MULTILINE,
+    )
+    authorization = re.search(
+        r"autorizaci[oó]n\s+(?:no|n[°º]|nro)\.?\s*:?\s*(\d+)\s*/\s*(\d+)\s*/\s*(\d+)",
+        text,
+        re.IGNORECASE,
+    )
+    expiry = re.search(
+        r"vencimiento\s*:\s*(\d{1,2})/(\d{1,2})/(\d{4})",
+        text,
+        re.IGNORECASE,
+    )
+    issue = re.search(
+        r"\bMontevideo,\s*(\d{1,2})\s+de\s+([A-Za-zÁÉÍÓÚáéíóú]+)\s+de\s+(\d{4})",
+        text,
+        re.IGNORECASE,
+    )
+    issue_date = ""
+    if issue:
+        month = MONTHS.get(normalized(issue.group(2)).casefold())
+        if month:
+            issue_date = _numeric_date(issue.group(1), str(month), issue.group(3))
+    return {
+        "representative": " ".join(representative.group(1).split()) if representative else "",
+        "authorization_number": "/".join(authorization.groups()) if authorization else "",
+        "issue_date": issue_date,
+        "expiry_date": _numeric_date(*expiry.groups()) if expiry else "",
+    }
+
+
 def _value_after_label(lines: list[str], labels: list[str]) -> str:
     patterns = [re.compile(label, re.IGNORECASE) for label in labels]
     for index, line in enumerate(lines):

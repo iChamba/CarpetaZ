@@ -75,7 +75,9 @@ export async function refreshIndexStatus() {
     const errorDetail = status.error_details && status.error_details.length
       ? ` · ${status.error_details[0]}`
       : "";
-    const label = status.running
+    const label = status.catalog_running
+      ? `${status.catalog_message}: ${status.catalog_processed} archivo(s)`
+      : status.running
       ? `${status.message}: ${status.processed}/${status.total}`
       : `${status.message} · ${status.total} PDF(s), ${status.errors} error(es)${errorDetail}`;
     document.getElementById("index-status").textContent = label;

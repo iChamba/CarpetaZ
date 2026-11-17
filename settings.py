@@ -15,6 +15,10 @@ DOCUMENT_ROOT = Path(ROOT_VALUE).expanduser().resolve()
 if not DOCUMENT_ROOT.is_dir():
     raise SystemExit(f"La carpeta DOCUMENT_ROOT no existe: {DOCUMENT_ROOT}")
 
+ENTITY_ROOT = Path(
+    os.environ.get("ENTITY_ROOT", str(APP_DIR.parent / "3 Entidades Usuarias"))
+).expanduser().resolve()
+
 APP_DATA = Path(os.environ.get("APP_DATA_DIR", str(APP_DIR / "appdata"))).resolve()
 APP_DATA.mkdir(parents=True, exist_ok=True)
 DATABASE = APP_DATA / "documentos.sqlite3"
@@ -41,4 +45,10 @@ INDEX_STATE = {
     "errors": 0,
     "error_details": [],
     "message": "Índice pendiente",
+    "catalog_running": False,
+    "catalog_processed": 0,
+    "catalog_total": 0,
+    "catalog_errors": 0,
+    "catalog_ready": False,
+    "catalog_message": "Catálogo pendiente",
 }

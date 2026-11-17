@@ -1,33 +1,37 @@
-import {
-  compareAuthorizationRecency,
-  getLoadedUsers,
-  getUserAuthorizationStatus,
-  loadUsers,
-} from "./users.js";
+import { compareAuthorizationRecency } from "./users.js";
 import { element, makeButton, requestJson, setMessage } from "./common.js";
 import { revealFolder } from "./documents.js";
 
+const RECORDS_PAGE_SIZE = 100;
+let recordsOffset = 0;
+let recordsTotal = 0;
+
 export function initRecords() {
   document.getElementById("record-rows").addEventListener("click", handleRecordAction);
-  document.getElementById("records-refresh").addEventListener("click", () => loadRecords(true));
+  document.getElementById("records-refresh").addEventListener("click", () => loadRecords(true, 0));
+  document.getElementById("records-prev").addEventListener("click", () => {
+    loadRecords(false, Math.max(0, recordsOffset - RECORDS_PAGE_SIZE));
+  });
+  document.getElementById("records-next").addEventListener("click", () => {
+    loadRecords(false, recordsOffset + RECORDS_PAGE_SIZE);
+  });
 }
 
-export async function loadRecords(forceRefresh = false) {
+export async function loadRecords(forceRefresh = false, offset = recordsOffset) {
   const body = document.getElementById("record-rows");
   body.replaceChildren();
   const summary = document.getElementById("records-summary");
   summary.replaceChildren();
   try {
-    let users = forceRefresh ? null : getLoadedUsers();
-    if (!users && !forceRefresh && !document.getElementById("user-query").value.trim()) {
-      if (!await loadUsers()) return false;
-      users = getLoadedUsers();
-    }
-    if (!users) {
-      users = (await requestJson("/api/users")).items;
-      window.dispatchEvent(new Event("users-stale"));
-    }
-    renderRecordsSummary(users);
+    const params = new URLSearchParams({
+      offset: String(forceRefresh ? 0 : offset),
+      limit: String(RECORDS_PAGE_SIZE),
+    });
+    const data = await requestJson(`/api/users?${params}`);
+    const users = data.items;
+    recordsOffset = data.offset;
+    recordsTotal = data.total;
+    renderRecordsSummary(data.summary);
     for (const user of users) {
       const latestRecord = [...(user.authorization_records || [])]
         .sort(compareAuthorizationRecency)[0];
@@ -66,7 +70,14 @@ export async function loadRecords(forceRefresh = false) {
 
       body.append(row);
     }
-    if (!users.length) {
+    const first = recordsTotal ? recordsOffset + 1 : 0;
+    const last = Math.min(recordsOffset + users.length, recordsTotal);
+    document.getElementById("records-page-label").textContent =
+      `${first}–${last} de ${recordsTotal} usuarios`;
+    document.getElementById("records-prev").disabled = recordsOffset <= 0;
+    document.getElementById("records-next").disabled =
+      recordsOffset + users.length >= recordsTotal;
+    if (!recordsTotal) {
       setMessage("records-message", "No se encontraron carpetas de usuarios.");
     }
     return true;
@@ -76,19 +87,7 @@ export async function loadRecords(forceRefresh = false) {
   }
 }
 
-function renderRecordsSummary(users) {
-  const counts = {
-    valid: 0,
-    soon: 0,
-    expired: 0,
-    unknown: 0,
-    pending: 0,
-    none: 0,
-  };
-  for (const user of users) {
-    counts[getUserAuthorizationStatus(user).filterValue] += 1;
-  }
-
+function renderRecordsSummary(counts) {
   const summary = document.getElementById("records-summary");
   const statuses = [
     { key: "valid", label: "Vigentes", className: "is-valid" },

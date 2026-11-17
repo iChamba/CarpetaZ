@@ -6,8 +6,9 @@ from datetime import datetime
 from pathlib import Path
 from urllib.parse import quote
 
+from catalog import catalog_status, parse_pagination
 from database import connect_db
-from documents import fts_expression, parse_docx, safe_relative_path
+from documents import extract_legacy_doc_text, fts_expression, parse_docx, safe_relative_path
 from settings import (
     ALLOWED_EXTENSIONS,
     APP_DATA,
@@ -22,67 +23,56 @@ class DocumentRoutes:
     def list_files(self, params: dict[str, list[str]]) -> None:
         query = params.get("q", [""])[0].strip().casefold()
         extension = params.get("ext", [""])[0].lower()
+        offset, limit = parse_pagination(params)
+        conditions = ["root = 'documents'"]
+        values: list[object] = []
+        if extension:
+            conditions.append("extension = ?")
+            values.append(extension)
+        if query:
+            conditions.append("instr(lower(path), lower(?)) > 0")
+            values.append(query)
+        where = " AND ".join(conditions)
+        connection = connect_db()
         try:
-            offset = max(0, int(params.get("offset", ["0"])[0]))
-            limit = min(200, max(1, int(params.get("limit", ["100"])[0])))
-        except ValueError:
-            raise ValueError("La página solicitada no es válida.") from None
-
-        matches: list[dict] = []
-        errors = 0
-
-        def on_error(_error: OSError) -> None:
-            nonlocal errors
-            errors += 1
-
-        for current, directories, filenames in os.walk(DOCUMENT_ROOT, onerror=on_error):
-            directories[:] = [
-                name for name in directories
-                if not name.startswith(".") and not (Path(current) / name).is_symlink()
-            ]
-            for filename in filenames:
-                path = Path(current) / filename
-                if path.suffix.lower() not in ALLOWED_EXTENSIONS:
-                    continue
-                if extension and path.suffix.lower() != extension:
-                    continue
-                relative = path.relative_to(DOCUMENT_ROOT).as_posix()
-                if query and query not in relative.casefold():
-                    continue
-                try:
-                    stat = path.stat()
-                except OSError:
-                    errors += 1
-                    continue
-                matches.append({
-                    "path": relative,
-                    "name": path.name,
-                    "extension": path.suffix.lower(),
-                    "size": stat.st_size,
-                    "modified": datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M"),
-                })
-
-        matches.sort(key=lambda item: item["path"].casefold())
+            total = connection.execute(
+                f"SELECT COUNT(*) FROM file_catalog WHERE {where}",
+                values,
+            ).fetchone()[0]
+            rows = connection.execute(
+                "SELECT path, name, extension, size, modified_ns FROM file_catalog "
+                f"WHERE {where} ORDER BY path COLLATE NOCASE LIMIT ? OFFSET ?",
+                (*values, limit, offset),
+            ).fetchall()
+        finally:
+            connection.close()
+        items = [{
+            "path": row["path"],
+            "name": row["name"],
+            "extension": row["extension"],
+            "size": row["size"],
+            "modified": datetime.fromtimestamp(row["modified_ns"] / 1_000_000_000)
+            .strftime("%Y-%m-%d %H:%M"),
+        } for row in rows]
         self.send_json({
-            "items": matches[offset:offset + limit],
-            "total": len(matches),
+            "items": items,
+            "total": total,
             "offset": offset,
             "limit": limit,
-            "warnings": errors,
+            "warnings": catalog_status()["errors"],
         })
 
     def list_workbooks(self) -> None:
-        items = []
-        for current, directories, filenames in os.walk(DOCUMENT_ROOT):
-            directories[:] = [
-                name for name in directories
-                if not name.startswith(".") and not (Path(current) / name).is_symlink()
-            ]
-            for filename in filenames:
-                path = Path(current) / filename
-                if path.suffix.lower() == ".xlsx" and not path.name.startswith("~$"):
-                    items.append(path.relative_to(DOCUMENT_ROOT).as_posix())
-        self.send_json({"items": sorted(items, key=str.casefold)})
+        connection = connect_db()
+        try:
+            rows = connection.execute(
+                "SELECT path FROM file_catalog WHERE root = 'documents' "
+                "AND extension = '.xlsx' AND name NOT LIKE '~$%' "
+                "ORDER BY path COLLATE NOCASE"
+            ).fetchall()
+        finally:
+            connection.close()
+        self.send_json({"items": [row["path"] for row in rows]})
 
     def search_pdfs(self, params: dict[str, list[str]]) -> None:
         query = params.get("q", [""])[0].strip()
@@ -158,15 +148,30 @@ class DocumentRoutes:
     def preview(self, params: dict[str, list[str]]) -> None:
         path, _ = safe_relative_path(params.get("path", [""])[0])
         extension = path.suffix.lower()
+        if extension in {".pdf", ".jpg", ".jpeg", ".png"}:
+            size = path.stat().st_size
+            self.send_response(200)
+            self.send_header(
+                "Content-Type",
+                mimetypes.guess_type(path.name)[0] or "application/octet-stream",
+            )
+            self.send_header("Content-Length", str(size))
+            self.send_header("Content-Disposition", f"inline; filename*=UTF-8''{quote(path.name)}")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            with path.open("rb") as source:
+                shutil.copyfileobj(source, self.wfile)
+            return
         if extension == ".docx":
             content = parse_docx(path).encode("utf-8")
+            content_type = "text/plain; charset=utf-8"
+        elif extension == ".doc":
+            content = extract_legacy_doc_text(path).encode("utf-8")
             content_type = "text/plain; charset=utf-8"
         elif extension == ".txt":
             content = path.read_bytes()
             content_type = "text/plain; charset=utf-8"
-        elif extension in {".pdf", ".jpg", ".jpeg", ".png"}:
-            content = path.read_bytes()
-            content_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
         else:
             raise ValueError("Este formato se puede descargar, pero no previsualizar.")
         self.send_response(200)

@@ -9,6 +9,7 @@ from urllib.parse import parse_qs, urlparse
 from database import initialize_db
 from documents import start_index
 from routes.documents import DocumentRoutes
+from routes.entities import EntityRoutes
 from routes.records import RecordRoutes
 from routes.users import UserRoutes
 from routes.workbooks import WorkbookRoutes
@@ -97,6 +98,7 @@ class BaseRequestHandler(BaseHTTPRequestHandler):
                 "/js/search.js": ("js/search.js", "text/javascript; charset=utf-8"),
                 "/js/records.js": ("js/records.js", "text/javascript; charset=utf-8"),
                 "/js/users.js": ("js/users.js", "text/javascript; charset=utf-8"),
+                "/js/entities.js": ("js/entities.js", "text/javascript; charset=utf-8"),
                 "/js/workbooks.js": ("js/workbooks.js", "text/javascript; charset=utf-8"),
             }
             if parsed.path in static_assets:
@@ -107,6 +109,16 @@ class BaseRequestHandler(BaseHTTPRequestHandler):
                 return self.send_json(state)
             if parsed.path == "/api/users":
                 return self.list_users(params)
+            if parsed.path == "/api/entities":
+                return self.list_entities(params)
+            if parsed.path == "/api/entity":
+                return self.get_entity(params)
+            if parsed.path == "/api/entity/import/status":
+                return self.entity_import_status()
+            if parsed.path == "/api/entity/preview":
+                return self.entity_preview(params)
+            if parsed.path == "/api/entity/download":
+                return self.entity_download(params)
             if parsed.path == "/api/user":
                 return self.get_user(params)
             if parsed.path == "/api/files":
@@ -146,7 +158,15 @@ class BaseRequestHandler(BaseHTTPRequestHandler):
                 return self.send_json({"started": True}, 202)
             if parsed.path == "/api/certificates/import":
                 return self.start_certificate_import()
+            if parsed.path == "/api/entity/import":
+                return self.start_entity_import()
             data = self.read_json()
+            if parsed.path == "/api/entity/extract":
+                return self.extract_entity_license(data)
+            if parsed.path == "/api/entity/open-location":
+                return self.open_entity_location(data)
+            if parsed.path == "/api/entity/open-folder":
+                return self.open_entity_folder(data)
             if parsed.path == "/api/open-location":
                 return self.open_location(data)
             if parsed.path == "/api/open-folder":
@@ -183,7 +203,14 @@ class BaseRequestHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
 
-class RequestHandler(DocumentRoutes, WorkbookRoutes, RecordRoutes, UserRoutes, BaseRequestHandler):
+class RequestHandler(
+    DocumentRoutes,
+    EntityRoutes,
+    WorkbookRoutes,
+    RecordRoutes,
+    UserRoutes,
+    BaseRequestHandler,
+):
     pass
 
 

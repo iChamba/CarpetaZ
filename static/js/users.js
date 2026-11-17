@@ -1,10 +1,15 @@
 import { extractRecord, previewFile, revealFile } from "./documents.js";
-import { element, formatSize, makeButton, requestJson, setMessage } from "./common.js";
+import { appendYearGroups, element, formatSize, makeButton, requestJson, setMessage } from "./common.js";
 
+const USER_PAGE_SIZE = 100;
+const FILE_PAGE_SIZE = 100;
 let selectedUser = "";
+let selectedUserOffset = 0;
+let usersOffset = 0;
+let usersTotal = 0;
 let usersLoadGeneration = 0;
 let usersLoadPromise = null;
-let usersLoadQuery = null;
+let usersLoadKey = null;
 let loadedUsers = [];
 let loadedUsersQuery = null;
 let userListWarnings = 0;
@@ -12,8 +17,10 @@ let userListWarnings = 0;
 export function initUsers() {
   document.getElementById("user-filter").addEventListener("submit", event => {
     event.preventDefault();
-    loadUsers();
+    usersOffset = 0;
+    loadUsers(0);
   });
+  document.getElementById("user-refresh").addEventListener("click", refreshCatalog);
   const authorizationFilter = document.getElementById("user-authorization-filter");
   const statusFilter = document.getElementById("user-status-filter");
   const practiceFilter = document.getElementById("user-practice-filter");
@@ -22,17 +29,70 @@ export function initUsers() {
     practiceFilter.disabled = authorizationFilter.value === "without";
     if (statusFilter.disabled) statusFilter.value = "";
     if (practiceFilter.disabled) practiceFilter.value = "";
-    renderUserList();
+    usersOffset = 0;
+    loadUsers(0);
   });
-  statusFilter.addEventListener("change", renderUserList);
-  practiceFilter.addEventListener("input", renderUserList);
+  statusFilter.addEventListener("change", () => {
+    usersOffset = 0;
+    loadUsers(0);
+  });
+  practiceFilter.addEventListener("input", () => {
+    usersOffset = 0;
+    loadUsers(0);
+  });
   document.getElementById("user-list").addEventListener("click", event => {
     const button = event.target.closest("button[data-user]");
-    if (button) loadUser(button.dataset.user);
+    if (button) loadUser(button.dataset.user, 0);
+  });
+  document.getElementById("user-prev").addEventListener("click", () => {
+    usersOffset = Math.max(0, usersOffset - USER_PAGE_SIZE);
+    loadUsers(usersOffset);
+  });
+  document.getElementById("user-next").addEventListener("click", () => {
+    usersOffset += USER_PAGE_SIZE;
+    loadUsers(usersOffset);
   });
   document.getElementById("user-profile").addEventListener("click", handleProfileAction);
   document.getElementById("import-certificates").addEventListener("click", startCertificateImport);
   refreshCertificateImportStatus();
+}
+
+async function refreshCatalog() {
+  const button = document.getElementById("user-refresh");
+  button.disabled = true;
+  setMessage("user-message", "Iniciando actualización del catálogo…");
+  try {
+    await requestJson("/api/index", { method: "POST" });
+    await waitForCatalogRefresh();
+  } catch (error) {
+    button.disabled = false;
+    setMessage("user-message", error.message, "error");
+  }
+}
+
+async function waitForCatalogRefresh() {
+  const button = document.getElementById("user-refresh");
+  try {
+    const status = await requestJson("/api/status");
+    if (status.catalog_running) {
+      setMessage(
+        "user-message",
+        `${status.catalog_message}: ${status.catalog_processed} archivo(s)`,
+      );
+      window.setTimeout(waitForCatalogRefresh, 1200);
+      return;
+    }
+    button.disabled = false;
+    if (status.catalog_errors) {
+      setMessage("user-message", status.catalog_message, "error");
+    }
+    invalidateLoadedUsers();
+    usersOffset = 0;
+    await loadUsers(0);
+  } catch (error) {
+    button.disabled = false;
+    setMessage("user-message", error.message, "error");
+  }
 }
 
 async function startCertificateImport() {
@@ -85,44 +145,67 @@ async function refreshCertificateImportStatus() {
   }
 }
 
-export function loadUsers() {
+export function loadUsers(offset = usersOffset) {
   const query = document.getElementById("user-query").value.trim();
-  if (usersLoadPromise && usersLoadQuery === query) return usersLoadPromise;
+  const authorization = document.getElementById("user-authorization-filter").value;
+  const status = document.getElementById("user-status-filter").value;
+  const practice = document.getElementById("user-practice-filter").value.trim();
+  const key = JSON.stringify([query, authorization, status, practice, offset]);
+  if (usersLoadPromise && usersLoadKey === key) return usersLoadPromise;
 
-  const promise = loadUsersForQuery(query);
+  const promise = loadUsersForQuery(query, authorization, status, practice, offset);
   usersLoadPromise = promise;
-  usersLoadQuery = query;
+  usersLoadKey = key;
   promise.then(
     () => {
       if (usersLoadPromise === promise) {
         usersLoadPromise = null;
-        usersLoadQuery = null;
+        usersLoadKey = null;
       }
     },
     () => {
       if (usersLoadPromise === promise) {
         usersLoadPromise = null;
-        usersLoadQuery = null;
+        usersLoadKey = null;
       }
     },
   );
   return promise;
 }
 
-async function loadUsersForQuery(query) {
+async function loadUsersForQuery(query, authorization, status, practice, offset) {
   const generation = ++usersLoadGeneration;
   const list = document.getElementById("user-list");
   list.replaceChildren();
   setMessage("user-message", "Cargando carpetas de usuarios…");
   try {
-    const data = await requestJson(`/api/users?q=${encodeURIComponent(query)}`);
+    const params = new URLSearchParams({
+      q: query,
+      authorization,
+      status,
+      practice,
+      offset: String(offset),
+      limit: String(USER_PAGE_SIZE),
+    });
+    const data = await requestJson(`/api/users?${params}`);
     if (generation !== usersLoadGeneration) return false;
     loadedUsers = data.items;
     loadedUsersQuery = query;
+    usersOffset = data.offset;
+    usersTotal = data.total;
     userListWarnings = data.warnings;
     renderUserList();
+    if (!data.catalog.ready && data.catalog.running) {
+      setMessage(
+        "user-message",
+        `${data.catalog.message}: ${data.catalog.processed} archivo(s) catalogados`,
+      );
+      window.setTimeout(() => loadUsers(offset), 1200);
+    } else if (!data.catalog.ready) {
+      setMessage("user-message", data.catalog.message, "error");
+    }
     if (selectedUser && data.items.some(user => user.name === selectedUser)) {
-      return await loadUser(selectedUser);
+      return await loadUser(selectedUser, selectedUserOffset);
     }
     return true;
   } catch (error) {
@@ -133,13 +216,13 @@ async function loadUsersForQuery(query) {
 }
 
 export function getLoadedUsers() {
-  return loadedUsersQuery === "" ? loadedUsers : null;
+  return loadedUsersQuery === "" && loadedUsers.length === usersTotal ? loadedUsers : null;
 }
 
 export function invalidateLoadedUsers() {
   usersLoadGeneration += 1;
   loadedUsersQuery = null;
-  usersLoadQuery = null;
+  usersLoadKey = null;
 }
 
 function renderUserList() {
@@ -189,7 +272,13 @@ function renderUserList() {
   const warning = userListWarnings
     ? ` Se omitieron ${userListWarnings} carpetas inaccesibles.`
     : "";
-  setMessage("user-message", `${users.length} de ${loadedUsers.length} usuario(s).${warning}`);
+  const first = usersTotal ? usersOffset + 1 : 0;
+  const last = Math.min(usersOffset + loadedUsers.length, usersTotal);
+  document.getElementById("user-page-label").textContent =
+    `${first}–${last} de ${usersTotal}`;
+  document.getElementById("user-prev").disabled = usersOffset <= 0;
+  document.getElementById("user-next").disabled = usersOffset + loadedUsers.length >= usersTotal;
+  setMessage("user-message", `${usersTotal} usuario(s).${warning}`);
 }
 
 function normalizePractice(value) {
@@ -201,14 +290,20 @@ function normalizePractice(value) {
     .replace(/\s+/g, " ");
 }
 
-async function loadUser(name) {
+async function loadUser(name, offset = 0) {
   selectedUser = name;
+  selectedUserOffset = offset;
   document.querySelectorAll(".user-list-item").forEach(button => {
     button.classList.toggle("active", button.dataset.user === name);
   });
   setMessage("user-message", `Abriendo ficha de ${name}…`);
   try {
-    const data = await requestJson(`/api/user?name=${encodeURIComponent(name)}`);
+    const params = new URLSearchParams({
+      name,
+      offset: String(offset),
+      limit: String(FILE_PAGE_SIZE),
+    });
+    const data = await requestJson(`/api/user?${params}`);
     renderUserProfile(data);
     const activeUser = document.querySelector(".user-list-item.active .user-list-count");
     if (activeUser) {
@@ -240,24 +335,31 @@ function renderUserProfile(data) {
   profile.append(heading);
 
   const certificatePaths = new Set(
-    data.files.filter(file => file.is_authorization_certificate).map(file => file.path),
+    data.authorization_files.map(file => file.path),
   );
-  const certificateRecords = data.records.filter(record => certificatePaths.has(record.source_path));
   const otherRecords = data.records.filter(record => !certificatePaths.has(record.source_path));
-  profile.append(renderAuthorizationSection(data.files, certificateRecords));
+  profile.append(renderAuthorizationSection(data.authorization_files, data.authorization_records));
 
   if (otherRecords.length) {
     profile.append(element("h4", "Otros datos importados"));
     profile.append(renderImportedRecords(otherRecords));
   }
 
-  profile.append(element("h4", `Documentos de la carpeta (${data.files.length})`));
-  if (!data.files.length) {
-    profile.append(element("p", "Esta carpeta no contiene documentos compatibles.", "empty-list"));
+  const browser = element("div", undefined, "preview-browser-layout preview-hidden");
+  const fileList = element("section", undefined, "preview-file-list");
+  fileList.append(element("h4", `Documentos de la carpeta (${data.user.document_count})`));
+  if (!data.user.document_count) {
+    fileList.append(element("p", "Esta carpeta no contiene documentos compatibles.", "empty-list"));
   } else {
-    profile.append(renderDocuments(data.files));
+    fileList.append(renderDocuments(
+      data.files,
+      data.offset,
+      data.limit,
+      data.user.document_count,
+    ));
   }
-  profile.append(renderPreviewPanel("user"));
+  browser.append(fileList, renderPreviewPanel("user"));
+  profile.append(browser);
 }
 
 function renderPreviewPanel(scope) {
@@ -312,7 +414,20 @@ function renderAuthorizationSection(files, records) {
       "is-pending",
     ));
   } else {
-    for (const record of orderedRecords) section.append(renderAuthorizationCard(record));
+    section.append(renderAuthorizationCard(orderedRecords[0]));
+    if (orderedRecords.length > 1) {
+      const toggle = document.createElement("button");
+      toggle.type = "button";
+      toggle.className = "button secondary authorization-previous-toggle";
+      toggle.dataset.action = "toggle-previous-authorizations";
+      toggle.setAttribute("aria-expanded", "false");
+      toggle.textContent = `Ver autorizaciones anteriores (${orderedRecords.length - 1})`;
+      const previous = element("div", undefined, "authorization-previous hidden");
+      for (const record of orderedRecords.slice(1)) {
+        previous.append(renderAuthorizationCard(record));
+      }
+      section.append(toggle, previous);
+    }
   }
 
   const importedPaths = new Set(orderedRecords.map(record => record.source_path));
@@ -412,7 +527,7 @@ function addCalendarMonths(date, months) {
   );
 }
 
-function authorizationStatus(expiryValue) {
+export function authorizationStatus(expiryValue) {
   const expiryDate = parseAuthorizationDate(expiryValue);
   if (!expiryDate) {
     return {
@@ -538,23 +653,24 @@ function renderImportedRecords(records) {
   return wrap;
 }
 
-function renderDocuments(files) {
+function renderDocuments(files, offset, limit, total) {
   const wrap = element("div", undefined, "table-wrap user-files-wrap");
   const table = document.createElement("table");
   const head = document.createElement("thead");
   const heading = document.createElement("tr");
-  ["Documento", "Tipo", "Tamaño", "Importación", "Acciones"].forEach(title => {
+  ["Documento", "Tipo", "Tamaño", "Creado", "Importación", "Acciones"].forEach(title => {
     heading.append(element("th", title));
   });
   head.append(heading);
   table.append(head);
 
   const body = document.createElement("tbody");
-  for (const file of files) {
+  appendYearGroups(body, files, 6, file => {
     const row = document.createElement("tr");
     row.append(element("td", file.path, "user-file-path"));
     row.append(element("td", file.extension));
     row.append(element("td", formatSize(file.size)));
+    row.append(element("td", (file.created || "").slice(0, 10)));
     row.append(element(
       "td",
       file.record
@@ -570,7 +686,7 @@ function renderDocuments(files) {
       preview.dataset.path = file.path;
       actions.append(preview);
     }
-    const reveal = makeButton("Ver en carpeta", "reveal");
+    const reveal = makeButton("Carpeta", "reveal");
     reveal.dataset.path = file.path;
     actions.append(reveal);
     const download = document.createElement("a");
@@ -582,24 +698,49 @@ function renderDocuments(files) {
       const importButton = makeButton(
         file.is_authorization_certificate
           ? (file.record ? "Actualizar certificado" : "Importar certificado")
-          : "Importar datos",
+          : "Importar",
         "import",
       );
       importButton.dataset.path = file.path;
       actions.append(importButton);
     }
     row.append(actions);
-    body.append(row);
-  }
+    return row;
+  });
   table.append(body);
   wrap.append(table);
+  const pagination = element("div", undefined, "pagination");
+  const first = total ? offset + 1 : 0;
+  const last = Math.min(offset + files.length, total);
+  pagination.append(element("span", `${first}–${last} de ${total} documentos`));
+  const controls = document.createElement("div");
+  const previous = makeButton("Anterior", "user-files-page", "button secondary small");
+  previous.dataset.offset = String(Math.max(0, offset - limit));
+  previous.disabled = offset <= 0;
+  const next = makeButton("Siguiente", "user-files-page", "button secondary small");
+  next.dataset.offset = String(offset + limit);
+  next.disabled = offset + files.length >= total;
+  controls.append(previous, next);
+  pagination.append(controls);
+  wrap.append(pagination);
   return wrap;
 }
 
 async function handleProfileAction(event) {
   const button = event.target.closest("button[data-action]");
   if (!button) return;
-  if (button.dataset.action === "preview") {
+  if (button.dataset.action === "user-files-page") {
+    await loadUser(selectedUser, Number(button.dataset.offset));
+  } else if (button.dataset.action === "toggle-previous-authorizations") {
+    const previous = button.nextElementSibling;
+    const expanded = button.getAttribute("aria-expanded") === "true";
+    button.setAttribute("aria-expanded", String(!expanded));
+    previous.classList.toggle("hidden", expanded);
+    button.textContent = expanded
+      ? `Ver autorizaciones anteriores (${previous.children.length})`
+      : "Ocultar autorizaciones anteriores";
+  } else if (button.dataset.action === "preview") {
+    button.closest(".preview-browser-layout").classList.remove("preview-hidden");
     previewFile(button.dataset.path, "user");
   } else if (button.dataset.action === "reveal") {
     revealFile(button.dataset.path, "user-message");

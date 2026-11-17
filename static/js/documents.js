@@ -27,7 +27,7 @@ export async function previewFile(path, scope = "user") {
     content.append(image);
     return;
   }
-  if (["txt", "docx"].includes(extension)) {
+  if (["txt", "doc", "docx"].includes(extension)) {
     try {
       const response = await fetch(url);
       if (!response.ok) {

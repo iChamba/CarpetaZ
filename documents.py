@@ -8,6 +8,7 @@ from xml.etree import ElementTree
 
 import pymupdf
 
+from catalog import sync_file_catalog
 from database import connect_db
 from settings import (
     ALLOWED_EXTENSIONS,
@@ -18,7 +19,10 @@ from settings import (
 )
 
 
-def safe_relative_path(value: str) -> tuple[Path, str]:
+def safe_relative_path(
+    value: str,
+    root: Path = DOCUMENT_ROOT,
+) -> tuple[Path, str]:
     if not value or "\x00" in value:
         raise ValueError("Falta la ruta del archivo.")
 
@@ -26,9 +30,11 @@ def safe_relative_path(value: str) -> tuple[Path, str]:
     if relative.is_absolute() or any(part in {"..", ""} for part in relative.parts):
         raise ValueError("La ruta solicitada no es válida.")
 
-    candidate = (DOCUMENT_ROOT / relative).resolve(strict=True)
+    resolved_root = root.resolve()
+    candidate = (resolved_root / relative).resolve(strict=True)
     try:
-        if os.path.commonpath((str(DOCUMENT_ROOT), str(candidate))) != str(DOCUMENT_ROOT):
+        common = os.path.commonpath((str(resolved_root), str(candidate)))
+        if os.path.normcase(common) != os.path.normcase(str(resolved_root)):
             raise ValueError("La ruta está fuera de la carpeta configurada.")
     except ValueError as exc:
         raise ValueError("La ruta está fuera de la carpeta configurada.") from exc
@@ -36,7 +42,7 @@ def safe_relative_path(value: str) -> tuple[Path, str]:
     if not candidate.is_file() or candidate.suffix.lower() not in ALLOWED_EXTENSIONS:
         raise ValueError("El archivo no existe o su formato no está habilitado.")
 
-    return candidate, candidate.relative_to(DOCUMENT_ROOT).as_posix()
+    return candidate, candidate.relative_to(resolved_root).as_posix()
 
 
 def file_version(path: Path) -> str:
@@ -49,107 +55,159 @@ def user_folder_from_path(source_path: str) -> str:
     return parts[0] if len(parts) > 1 and parts[0] else "Sin usuario asignado"
 
 
-def collect_pdfs() -> tuple[list[Path], list[str]]:
-    found: list[Path] = []
-    errors: list[str] = []
-
-    def on_walk_error(error: OSError) -> None:
-        errors.append(str(error))
-
-    for current, directories, filenames in os.walk(DOCUMENT_ROOT, onerror=on_walk_error):
-        directories[:] = [
-            name for name in directories
-            if not name.startswith(".") and not (Path(current) / name).is_symlink()
-        ]
-        for filename in filenames:
-            if Path(filename).suffix.lower() == ".pdf":
-                found.append(Path(current) / filename)
-    return found, errors
-
-
 def extract_pdf_text(path: Path) -> str:
     with pymupdf.open(path) as document:
         return "\n".join(page.get_text("text", sort=True) for page in document)
 
 
+def extract_legacy_doc_text(path: Path) -> str:
+    if os.name != "nt":
+        raise RuntimeError("La lectura de archivos Word 2003 requiere Windows y Microsoft Word.")
+    try:
+        import pythoncom
+        import win32com.client
+    except ImportError as exc:
+        raise RuntimeError(
+            "Para leer archivos Word 2003 instala las dependencias de la aplicación "
+            "y Microsoft Word en este equipo."
+        ) from exc
+
+    pythoncom.CoInitialize()
+    word = None
+    document = None
+    try:
+        word = win32com.client.DispatchEx("Word.Application")
+        word.Visible = False
+        word.DisplayAlerts = 0
+        word.AutomationSecurity = 3
+        document = word.Documents.Open(
+            FileName=str(path.resolve()),
+            ConfirmConversions=False,
+            ReadOnly=True,
+            AddToRecentFiles=False,
+            Revert=False,
+            Visible=False,
+            OpenAndRepair=True,
+            NoEncodingDialog=True,
+        )
+        return document.Content.Text
+    except pythoncom.com_error as exc:
+        raise ValueError(f"Microsoft Word no pudo leer el documento: {path.name}") from exc
+    finally:
+        try:
+            if document is not None:
+                document.Close(SaveChanges=0)
+        finally:
+            try:
+                if word is not None:
+                    word.Quit(SaveChanges=0)
+            finally:
+                pythoncom.CoUninitialize()
+
+
 def update_index() -> None:
     try:
-        pdfs, walk_errors = collect_pdfs()
+        sync_file_catalog()
+        connection = connect_db()
+        try:
+            total = connection.execute(
+                "SELECT COUNT(*) FROM file_catalog "
+                "WHERE root = 'documents' AND extension = '.pdf'"
+            ).fetchone()[0]
+        except Exception:
+            connection.close()
+            raise
+
         with INDEX_STATE_LOCK:
             INDEX_STATE.update({
                 "processed": 0,
-                "total": len(pdfs),
+                "total": total,
                 "indexed": 0,
                 "unchanged": 0,
                 "without_text": 0,
-                "errors": len(walk_errors),
-                "error_details": walk_errors[:5],
+                "errors": 0,
+                "error_details": [],
                 "message": "Indexando archivos PDF",
             })
 
-        seen: set[str] = set()
-        connection = connect_db()
         try:
-            for path in pdfs:
-                relative = path.relative_to(DOCUMENT_ROOT).as_posix()
-                try:
-                    seen.add(relative)
-                    stat = path.stat()
-                    current = connection.execute(
-                        "SELECT size, modified_ns FROM pdf_index_meta WHERE path = ?",
-                        (relative,),
-                    ).fetchone()
-                    unchanged = bool(
-                        current
-                        and current["size"] == stat.st_size
-                        and current["modified_ns"] == stat.st_mtime_ns
-                    )
-                    indexed_document = None
-                    if unchanged:
-                        indexed_document = connection.execute(
-                            "SELECT CASE WHEN trim(content) = '' THEN 0 ELSE 1 END AS has_text "
-                            "FROM pdf_fts WHERE path = ? LIMIT 1",
+            last_path = ""
+            while True:
+                pdf_batch = connection.execute(
+                    "SELECT path, size, modified_ns FROM file_catalog "
+                    "WHERE root = 'documents' AND extension = '.pdf' AND path > ? "
+                    "ORDER BY path LIMIT 500",
+                    (last_path,),
+                ).fetchall()
+                if not pdf_batch:
+                    break
+                for pdf in pdf_batch:
+                    relative = pdf["path"]
+                    path = DOCUMENT_ROOT / Path(relative)
+                    try:
+                        current = connection.execute(
+                            "SELECT size, modified_ns FROM pdf_index_meta WHERE path = ?",
                             (relative,),
                         ).fetchone()
-                        unchanged = indexed_document is not None
-                    if unchanged:
-                        with INDEX_STATE_LOCK:
-                            INDEX_STATE["unchanged"] += 1
-                            if not indexed_document["has_text"]:
-                                INDEX_STATE["without_text"] += 1
-                    else:
-                        text = extract_pdf_text(path)
+                        unchanged = bool(
+                            current
+                            and current["size"] == pdf["size"]
+                            and current["modified_ns"] == pdf["modified_ns"]
+                        )
+                        indexed_document = None
+                        if unchanged:
+                            indexed_document = connection.execute(
+                                "SELECT CASE WHEN trim(content) = '' THEN 0 ELSE 1 END AS has_text "
+                                "FROM pdf_fts WHERE path = ? LIMIT 1",
+                                (relative,),
+                            ).fetchone()
+                            unchanged = indexed_document is not None
+                        if unchanged:
+                            with INDEX_STATE_LOCK:
+                                INDEX_STATE["unchanged"] += 1
+                                if not indexed_document["has_text"]:
+                                    INDEX_STATE["without_text"] += 1
+                        else:
+                            text = extract_pdf_text(path)
+                            connection.execute("DELETE FROM pdf_fts WHERE path = ?", (relative,))
+                            connection.execute(
+                                "INSERT INTO pdf_fts(path, content) VALUES (?, ?)",
+                                (relative, text),
+                            )
+                            connection.execute(
+                                "INSERT INTO pdf_index_meta(path, size, modified_ns) VALUES (?, ?, ?) "
+                                "ON CONFLICT(path) DO UPDATE SET size=excluded.size, "
+                                "modified_ns=excluded.modified_ns",
+                                (relative, pdf["size"], pdf["modified_ns"]),
+                            )
+                            with INDEX_STATE_LOCK:
+                                INDEX_STATE["indexed"] += 1
+                                if not text.strip():
+                                    INDEX_STATE["without_text"] += 1
+                    except Exception as exc:
                         connection.execute("DELETE FROM pdf_fts WHERE path = ?", (relative,))
-                        connection.execute(
-                            "INSERT INTO pdf_fts(path, content) VALUES (?, ?)",
-                            (relative, text),
-                        )
-                        connection.execute(
-                            "INSERT INTO pdf_index_meta(path, size, modified_ns) VALUES (?, ?, ?) "
-                            "ON CONFLICT(path) DO UPDATE SET size=excluded.size, "
-                            "modified_ns=excluded.modified_ns",
-                            (relative, stat.st_size, stat.st_mtime_ns),
-                        )
+                        connection.execute("DELETE FROM pdf_index_meta WHERE path = ?", (relative,))
                         with INDEX_STATE_LOCK:
-                            INDEX_STATE["indexed"] += 1
-                            if not text.strip():
-                                INDEX_STATE["without_text"] += 1
-                except Exception as exc:
-                    connection.execute("DELETE FROM pdf_fts WHERE path = ?", (relative,))
-                    connection.execute("DELETE FROM pdf_index_meta WHERE path = ?", (relative,))
+                            INDEX_STATE["errors"] += 1
+                            if len(INDEX_STATE["error_details"]) < 5:
+                                INDEX_STATE["error_details"].append(f"{relative}: {exc}")
+
                     with INDEX_STATE_LOCK:
-                        INDEX_STATE["errors"] += 1
-                        if len(INDEX_STATE["error_details"]) < 5:
-                            INDEX_STATE["error_details"].append(f"{relative}: {exc}")
+                        INDEX_STATE["processed"] += 1
+                last_path = pdf_batch[-1]["path"]
+                connection.commit()
 
-                with INDEX_STATE_LOCK:
-                    INDEX_STATE["processed"] += 1
-
-            existing = connection.execute("SELECT path FROM pdf_index_meta").fetchall()
-            stale = [row["path"] for row in existing if row["path"] not in seen]
-            for relative in stale:
-                connection.execute("DELETE FROM pdf_fts WHERE path = ?", (relative,))
-                connection.execute("DELETE FROM pdf_index_meta WHERE path = ?", (relative,))
+            connection.execute(
+                "DELETE FROM pdf_index_meta WHERE NOT EXISTS ("
+                "SELECT 1 FROM file_catalog "
+                "WHERE file_catalog.root = 'documents' "
+                "AND file_catalog.extension = '.pdf' "
+                "AND file_catalog.path = pdf_index_meta.path)"
+            )
+            connection.execute(
+                "DELETE FROM pdf_fts WHERE path NOT IN "
+                "(SELECT path FROM pdf_index_meta)"
+            )
             connection.commit()
         finally:
             connection.close()
