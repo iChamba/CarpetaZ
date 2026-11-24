@@ -30,6 +30,78 @@ export function makeButton(label, action, className = "button secondary small") 
   return button;
 }
 
+export function initDirectoryToggle(scope, label) {
+  const toggle = document.getElementById(`${scope}-directory-toggle`);
+  const content = document.getElementById(`${scope}-directory-content`);
+  const layout = document.getElementById(`${scope}-layout`);
+  toggle.addEventListener("click", () => {
+    const collapsed = toggle.getAttribute("aria-expanded") === "true";
+    content.hidden = collapsed;
+    layout.classList.toggle("user-directory-collapsed", collapsed);
+    toggle.setAttribute("aria-expanded", String(!collapsed));
+    toggle.setAttribute("aria-label", `${collapsed ? "Mostrar" : "Ocultar"} ${label}`);
+    toggle.textContent = collapsed ? `› Mostrar ${label}` : "‹ Ocultar";
+  });
+}
+
+let pdfViewer;
+
+function getPdfViewer() {
+  if (pdfViewer) return pdfViewer;
+
+  const dialog = element("dialog", undefined, "pdf-viewer-dialog");
+  dialog.setAttribute("aria-labelledby", "pdf-viewer-title");
+  const modal = element("div", undefined, "pdf-viewer-modal");
+  const header = element("div", undefined, "pdf-viewer-modal-header");
+  const title = element("h2", "", "pdf-viewer-modal-title");
+  title.id = "pdf-viewer-title";
+  const close = makeButton("Cerrar", "close-pdf-viewer", "button secondary");
+  close.setAttribute("aria-label", "Cerrar visor ampliado");
+  const frame = document.createElement("iframe");
+  frame.title = "Visor ampliado de PDF";
+
+  close.addEventListener("click", () => dialog.close());
+  dialog.addEventListener("click", event => {
+    if (event.target === dialog) dialog.close();
+  });
+  dialog.addEventListener("close", () => frame.removeAttribute("src"));
+
+  header.append(title, close);
+  modal.append(header, frame);
+  dialog.append(modal);
+  document.body.append(dialog);
+  pdfViewer = { dialog, title, frame };
+  return pdfViewer;
+}
+
+export function resetPreviewActions(title) {
+  let actions = title.parentElement.querySelector(".preview-actions");
+  if (!actions) {
+    actions = element("div", undefined, "preview-actions");
+    title.parentElement.insertBefore(actions, title);
+  }
+  actions.replaceChildren();
+}
+
+export function setPreviewCloseAction(title, closePreview) {
+  const close = makeButton("Cerrar archivo", "close-preview", "button danger small");
+  close.addEventListener("click", closePreview);
+  title.parentElement.querySelector(".preview-actions").append(close);
+}
+
+export function setPdfPreviewActions(title, frame, closePreview) {
+  setPreviewCloseAction(title, closePreview);
+  const actions = title.parentElement.querySelector(".preview-actions");
+  const enlarge = makeButton("Ampliar", "enlarge-preview", "button primary small");
+  enlarge.addEventListener("click", () => {
+    const viewer = getPdfViewer();
+    viewer.title.textContent = title.textContent;
+    viewer.frame.src = frame.src;
+    if (!viewer.dialog.open) viewer.dialog.showModal();
+  });
+  actions.append(enlarge);
+}
+
 export function appendYearGroups(body, files, colspan, buildRow) {
   const groups = new Map();
   for (const file of files) {

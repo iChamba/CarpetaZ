@@ -8,14 +8,12 @@ from urllib.parse import quote
 
 from catalog import catalog_status, parse_pagination
 from database import connect_db
-from documents import extract_legacy_doc_text, fts_expression, parse_docx, safe_relative_path
+from documents import extract_legacy_doc_text, parse_docx, safe_relative_path
 from settings import (
+    AppError,
     ALLOWED_EXTENSIONS,
     APP_DATA,
     DOCUMENT_ROOT,
-    INDEX_STATE,
-    INDEX_STATE_LOCK,
-    MAX_SEARCH_RESULTS,
 )
 
 
@@ -62,53 +60,18 @@ class DocumentRoutes:
             "warnings": catalog_status()["errors"],
         })
 
-    def list_workbooks(self) -> None:
-        connection = connect_db()
-        try:
-            rows = connection.execute(
-                "SELECT path FROM file_catalog WHERE root = 'documents' "
-                "AND extension = '.xlsx' AND name NOT LIKE '~$%' "
-                "ORDER BY path COLLATE NOCASE"
-            ).fetchall()
-        finally:
-            connection.close()
-        self.send_json({"items": [row["path"] for row in rows]})
-
-    def search_pdfs(self, params: dict[str, list[str]]) -> None:
-        query = params.get("q", [""])[0].strip()
-        if len(query) > 200:
-            raise ValueError("La búsqueda admite hasta 200 caracteres.")
-        expression = fts_expression(query)
-        try:
-            limit = min(MAX_SEARCH_RESULTS, max(1, int(params.get("limit", ["100"])[0])))
-        except ValueError:
-            raise ValueError("El límite de resultados no es válido.") from None
-
-        connection = connect_db()
-        try:
-            rows = connection.execute(
-                "SELECT path, snippet(pdf_fts, 1, '', '', ' … ', 18) AS excerpt "
-                "FROM pdf_fts WHERE pdf_fts MATCH ? LIMIT ?",
-                (expression, limit),
-            ).fetchall()
-        finally:
-            connection.close()
-        with INDEX_STATE_LOCK:
-            status = dict(INDEX_STATE)
-        self.send_json({"items": [dict(row) for row in rows], "index": status})
-
     def open_location(self, data: dict) -> None:
         relative_path = data.get("path")
         if not isinstance(relative_path, str):
             raise ValueError("Falta la ruta del archivo.")
         if os.name != "nt":
-            raise RuntimeError("Abrir una ubicación en el Explorador requiere Windows.")
+            raise AppError("Abrir una ubicación en el Explorador requiere Windows.")
 
         path, relative = safe_relative_path(relative_path)
         try:
             subprocess.Popen(["explorer.exe", "/select,", str(path)])
         except OSError as exc:
-            raise RuntimeError("No se pudo iniciar el Explorador de archivos.") from exc
+            raise AppError("No se pudo iniciar el Explorador de archivos.") from exc
         self.send_json({"opened": True, "path": relative}, 202)
 
     def open_folder(self, data: dict) -> None:
@@ -122,7 +85,7 @@ class DocumentRoutes:
         ):
             raise ValueError("La carpeta de usuario indicada no es válida.")
         if os.name != "nt":
-            raise RuntimeError("Abrir una carpeta en el Explorador requiere Windows.")
+            raise AppError("Abrir una carpeta en el Explorador requiere Windows.")
 
         folder = DOCUMENT_ROOT / name
         if folder.is_symlink():
@@ -142,7 +105,7 @@ class DocumentRoutes:
         try:
             subprocess.Popen(["explorer.exe", str(resolved)])
         except OSError as exc:
-            raise RuntimeError("No se pudo iniciar el Explorador de archivos.") from exc
+            raise AppError("No se pudo iniciar el Explorador de archivos.") from exc
         self.send_json({"opened": True, "name": name}, 202)
 
     def preview(self, params: dict[str, list[str]]) -> None:
@@ -173,7 +136,7 @@ class DocumentRoutes:
             content = path.read_bytes()
             content_type = "text/plain; charset=utf-8"
         else:
-            raise ValueError("Este formato se puede descargar, pero no previsualizar.")
+            raise ValueError("Este formato no se puede previsualizar.")
         self.send_response(200)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(content)))
@@ -182,15 +145,3 @@ class DocumentRoutes:
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(content)
-
-    def download(self, params: dict[str, list[str]]) -> None:
-        path, _ = safe_relative_path(params.get("path", [""])[0])
-        size = path.stat().st_size
-        self.send_response(200)
-        self.send_header("Content-Type", mimetypes.guess_type(path.name)[0] or "application/octet-stream")
-        self.send_header("Content-Length", str(size))
-        self.send_header("Content-Disposition", f"attachment; filename*=UTF-8''{quote(path.name)}")
-        self.send_header("X-Content-Type-Options", "nosniff")
-        self.end_headers()
-        with path.open("rb") as source:
-            shutil.copyfileobj(source, self.wfile)

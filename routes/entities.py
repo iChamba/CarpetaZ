@@ -1,23 +1,33 @@
 import mimetypes
+import json
 import os
 import re
-import shutil
 import subprocess
 import threading
 import unicodedata
-from datetime import datetime
+from calendar import monthrange
+from datetime import date, datetime
 from pathlib import Path
 from urllib.parse import quote
 
-from catalog import catalog_status, parse_pagination
+import pymupdf
+
+from catalog import catalog_status, iter_tree_files, parse_pagination
 from database import connect_db
-from documents import extract_legacy_doc_text, extract_pdf_text, parse_docx, safe_relative_path
-from extraction import extract_license_details, extract_operation_license
-from settings import ALLOWED_EXTENSIONS, APP_DATA, ENTITY_ROOT
+from documents import (
+    extract_docx_tables, extract_legacy_doc_content, extract_legacy_doc_text,
+    parse_docx, safe_relative_path, word_session,
+)
+from extraction import extract_license_details, extract_license_technical_tables, extract_operation_license
+from settings import ALLOWED_EXTENSIONS, AppError, APP_DATA, ENTITY_ROOT, INDEX_STATE, INDEX_STATE_LOCK
 
 IMPORTABLE_EXTENSIONS = {".pdf", ".doc", ".docx", ".txt"}
 PREVIEWABLE_EXTENSIONS = {".pdf", ".doc", ".docx", ".txt", ".jpg", ".jpeg", ".png"}
 ENTITY_IMPORT_LOCK = threading.Lock()
+# Recorrer la carpeta compartida es lento; el árbol de instituciones se reutiliza
+# hasta que termina una nueva actualización del catálogo.
+ENTITY_AREAS_CACHE_LOCK = threading.Lock()
+ENTITY_AREAS_CACHE: dict = {"key": None, "value": None}
 ENTITY_IMPORT_STATE_LOCK = threading.Lock()
 ENTITY_IMPORT_STATE = {
     "has_run": False,
@@ -34,6 +44,39 @@ ENTITY_IMPORT_STATE = {
 }
 
 
+def _is_operation_license_file(name: str) -> bool:
+    return name.casefold().startswith("lo")
+
+
+def _is_technical_opinion_file(name: str) -> bool:
+    return name.casefold().startswith("dt")
+
+
+def _operation_license_status(expiry_value: str | None) -> str:
+    expiry_date = None
+    for pattern in ("%d/%m/%Y", "%Y-%m-%d"):
+        try:
+            expiry_date = datetime.strptime(expiry_value or "", pattern).date()
+            break
+        except ValueError:
+            continue
+    if not expiry_date:
+        return "unknown"
+
+    today = date.today()
+    if expiry_date < today:
+        return "expired"
+    target_month = today.month + 2
+    target_year = today.year + (target_month - 1) // 12
+    target_month = (target_month - 1) % 12 + 1
+    threshold = today.replace(
+        year=target_year,
+        month=target_month,
+        day=min(today.day, monthrange(target_year, target_month)[1]),
+    )
+    return "soon" if expiry_date <= threshold else "valid"
+
+
 def _entity_name_key(name: str) -> str:
     return unicodedata.normalize("NFKC", name).strip().casefold()
 
@@ -43,11 +86,46 @@ def _catalog_path_bounds(relative_path: str) -> tuple[str, str]:
     return prefix, prefix + "\U0010ffff"
 
 
+def _entity_file_groups(connection, relative_path: str, lower: str, upper: str) -> list[dict]:
+    rows = connection.execute(
+        "SELECT folder, COUNT(*) AS document_count FROM ("
+        "SELECT CASE WHEN instr(relative_path, '/') = 0 THEN '' "
+        "ELSE substr(relative_path, 1, instr(relative_path, '/') - 1) END AS folder "
+        "FROM (SELECT substr(path, length(?) + 2) AS relative_path "
+        "FROM file_catalog WHERE root = 'entities' AND path >= ? AND path < ?)"
+        ") GROUP BY folder "
+        "ORDER BY CASE WHEN folder = '' THEN 0 ELSE 1 END, folder COLLATE NOCASE",
+        (relative_path, lower, upper),
+    ).fetchall()
+    return [{
+        "name": row["folder"],
+        "document_count": row["document_count"],
+        "is_root": not row["folder"],
+    } for row in rows]
+
+
 def _is_numbered_division(name: str) -> bool:
     return bool(re.match(r"^\s*\d+(?:[.)-]\s*|\s+)\S", name))
 
 
 def _entity_areas() -> tuple[list[dict[str, str | Path]], int]:
+    with INDEX_STATE_LOCK:
+        generation = INDEX_STATE.get("catalog_generation", 0)
+    key = (str(ENTITY_ROOT), str(APP_DATA), generation)
+    with ENTITY_AREAS_CACHE_LOCK:
+        if ENTITY_AREAS_CACHE["key"] == key:
+            areas, warnings = ENTITY_AREAS_CACHE["value"]
+            return list(areas), warnings
+    areas, warnings = _scan_entity_areas()
+    # Un recorrido con ubicaciones inaccesibles no se guarda, para reintentarlo.
+    if not warnings:
+        with ENTITY_AREAS_CACHE_LOCK:
+            ENTITY_AREAS_CACHE["key"] = key
+            ENTITY_AREAS_CACHE["value"] = (areas, warnings)
+    return list(areas), warnings
+
+
+def _scan_entity_areas() -> tuple[list[dict[str, str | Path]], int]:
     if not ENTITY_ROOT.is_dir():
         raise FileNotFoundError("No se encontró la carpeta de entidades usuarias.")
 
@@ -146,33 +224,49 @@ def _entity_files(folder: Path) -> tuple[list[Path], int]:
         nonlocal warnings
         warnings += 1
 
-    for current, directories, filenames in os.walk(folder, onerror=on_error):
-        directories[:] = [
-            name for name in directories
-            if not name.startswith(".") and not (Path(current) / name).is_symlink()
-        ]
-        for filename in filenames:
-            path = Path(current) / filename
-            if path.suffix.lower() in ALLOWED_EXTENSIONS and not path.is_symlink():
-                files.append(path)
+    for entry in iter_tree_files(folder, on_error):
+        path = Path(entry.path)
+        if path.suffix.lower() in ALLOWED_EXTENSIONS:
+            files.append(path)
     files.sort(key=lambda path: path.as_posix().casefold())
     return files, warnings
 
 
-def _extract_text(path: Path) -> str:
+def _extract_license_content(path: Path) -> tuple[str, list[dict]]:
     extension = path.suffix.lower()
     if extension == ".pdf":
-        return extract_pdf_text(path)
-    if extension == ".doc":
-        return extract_legacy_doc_text(path)
-    if extension == ".docx":
-        return parse_docx(path)
-    if extension == ".txt":
-        return path.read_text(encoding="utf-8-sig")
-    raise ValueError("La extracción de licencias está disponible para PDF, DOCX y TXT.")
+        text_parts = []
+        tables = []
+        with pymupdf.open(path) as document:
+            for page in document:
+                page_text = page.get_text("text", sort=True)
+                text_parts.append(page_text)
+                if not re.search(r"equipos?|sistemas?|fuentes?", page_text, re.IGNORECASE):
+                    continue
+                blocks = page.get_text("blocks")
+                for table in page.find_tables().tables:
+                    preceding = [
+                        block for block in blocks
+                        if 0 <= table.bbox[1] - block[3] <= 40
+                    ]
+                    context = max(preceding, key=lambda block: block[3])[4] if preceding else ""
+                    tables.append((context, table.extract()))
+        text = "\n".join(text_parts)
+    elif extension == ".doc":
+        text, tables = extract_legacy_doc_content(path)
+    elif extension == ".docx":
+        text, tables = parse_docx(path), extract_docx_tables(path)
+    elif extension == ".txt":
+        text, tables = path.read_text(encoding="utf-8-sig"), []
+    else:
+        raise ValueError("La extracción de licencias está disponible para PDF, DOC, DOCX y TXT.")
+    return text, extract_license_technical_tables(tables)
 
 
-def _save_license(relative: str, license_number: str, details: dict[str, str] | None = None) -> bool:
+def _save_license(
+    relative: str, license_number: str, details: dict[str, str] | None = None,
+    technical_tables: list[dict] | None = None,
+) -> bool:
     details = details or {}
     connection = connect_db()
     try:
@@ -182,12 +276,13 @@ def _save_license(relative: str, license_number: str, details: dict[str, str] | 
         ).fetchone()
         connection.execute(
             "INSERT INTO entity_licenses(source_path, created_at, license_number, "
-            "representative, authorization_number, issue_date, expiry_date) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(source_path) DO UPDATE SET "
+            "representative, authorization_number, issue_date, expiry_date, technical_tables) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(source_path) DO UPDATE SET "
             "created_at = excluded.created_at, license_number = excluded.license_number, "
             "representative = excluded.representative, "
             "authorization_number = excluded.authorization_number, "
-            "issue_date = excluded.issue_date, expiry_date = excluded.expiry_date",
+            "issue_date = excluded.issue_date, expiry_date = excluded.expiry_date, "
+            "technical_tables = COALESCE(excluded.technical_tables, entity_licenses.technical_tables)",
             (
                 relative,
                 datetime.now().isoformat(timespec="seconds"),
@@ -196,6 +291,7 @@ def _save_license(relative: str, license_number: str, details: dict[str, str] | 
                 details.get("authorization_number", ""),
                 details.get("issue_date", ""),
                 details.get("expiry_date", ""),
+                json.dumps(technical_tables, ensure_ascii=False) if technical_tables is not None else None,
             ),
         )
         connection.commit()
@@ -237,6 +333,12 @@ def _build_license_cards(rows) -> list[dict]:
             "authorization_number": pick("authorization_number"),
             "issue_date": pick("issue_date"),
             "expiry_date": pick("expiry_date"),
+            "technical_tables": [
+                {**table, "source_path": row["path"], "source_name": row["name"]}
+                for row in ordered if row["technical_tables"] is not None
+                for table in json.loads(row["technical_tables"])
+            ],
+            "technical_tables_pending": sum(row["technical_tables"] is None for row in ordered),
             "source_path": ordered[0]["path"],
             "documents": [
                 {"path": row["path"], "name": row["name"]}
@@ -264,10 +366,16 @@ def _authorization_folders(area_folder: Path) -> list[Path]:
 
 
 def _entity_import_worker() -> None:
+    # Una sola instancia de Word para todos los .doc de la revisión.
+    with word_session():
+        _run_entity_import()
+
+
+def _run_entity_import() -> None:
     try:
         files: list[Path] = []
         errors: list[str] = []
-        areas, area_warnings = _entity_areas()
+        areas, area_warnings = _scan_entity_areas()
         if area_warnings:
             errors.append(f"{area_warnings} ubicación(es) inaccesibles al buscar instituciones")
         for area in areas:
@@ -276,6 +384,7 @@ def _entity_import_worker() -> None:
                 files.extend(
                     path for path in entity_files
                     if path.suffix.lower() in IMPORTABLE_EXTENSIONS
+                    and _is_operation_license_file(path.name)
                     and not path.name.startswith("~$")
                 )
                 if warnings:
@@ -300,7 +409,7 @@ def _entity_import_worker() -> None:
             relative = path.relative_to(ENTITY_ROOT).as_posix()
             try:
                 safe_path, relative = safe_relative_path(relative, ENTITY_ROOT)
-                text = _extract_text(safe_path)
+                text, technical_tables = _extract_license_content(safe_path)
                 if not text.strip():
                     with ENTITY_IMPORT_STATE_LOCK:
                         ENTITY_IMPORT_STATE["without_text"] += 1
@@ -312,7 +421,7 @@ def _entity_import_worker() -> None:
                     with ENTITY_IMPORT_STATE_LOCK:
                         ENTITY_IMPORT_STATE["without_license"] += 1
                     continue
-                if _save_license(relative, license_number, extract_license_details(text)):
+                if _save_license(relative, license_number, extract_license_details(text), technical_tables):
                     with ENTITY_IMPORT_STATE_LOCK:
                         ENTITY_IMPORT_STATE["updated"] += 1
                 else:
@@ -345,32 +454,111 @@ def _entity_import_worker() -> None:
 
 
 class EntityRoutes:
+    def list_entity_licenses(self, params: dict[str, list[str]]) -> None:
+        offset, limit = parse_pagination(params)
+        areas, warnings = _entity_areas()
+        areas_by_path = {area["relative_path"]: area for area in areas}
+        connection = connect_db()
+        try:
+            rows = connection.execute(
+                "SELECT license.license_number, license.representative, "
+                "license.authorization_number, license.issue_date, license.expiry_date, "
+                "license.technical_tables, "
+                "file.path, file.name FROM file_catalog AS file "
+                "JOIN entity_licenses AS license ON license.source_path = file.path "
+                "WHERE file.root = 'entities' AND substr(upper(file.name), 1, 2) = 'LO'"
+            ).fetchall()
+        finally:
+            connection.close()
+
+        grouped = {}
+        practice_names = {}
+        for row in rows:
+            parts = row["path"].split("/")
+            area = next(
+                (areas_by_path["/".join(parts[:index])]
+                 for index in range(len(parts) - 1, 0, -1)
+                 if "/".join(parts[:index]) in areas_by_path),
+                None,
+            )
+            if area is None:
+                continue
+            key = (_entity_name_key(area["practice"]), _entity_name_key(area["institution"]))
+            group = grouped.setdefault(key, {
+                "practice": practice_names.setdefault(key[0], area["practice"]),
+                "institution": area["institution"],
+                "rows": [],
+            })
+            group["rows"].append(dict(row))
+
+        items = []
+        summary = {"valid": 0, "soon": 0, "expired": 0, "unknown": 0}
+        for group in grouped.values():
+            for card in _build_license_cards(group["rows"]):
+                status = _operation_license_status(card["expiry_date"])
+                summary[status] += 1
+                items.append({
+                    "practice": group["practice"],
+                    "institution": group["institution"],
+                    "status": status,
+                    **card,
+                })
+        items.sort(key=lambda item: (
+            _entity_name_key(item["practice"]),
+            _entity_name_key(item["institution"]),
+            item["license_number"].casefold(),
+        ))
+        self.send_json({
+            "items": items[offset:offset + limit],
+            "total": len(items),
+            "summary": summary,
+            "offset": offset,
+            "limit": limit,
+            "warnings": warnings + catalog_status()["errors"],
+            "catalog": catalog_status(),
+        })
+
     def list_entities(self, params: dict[str, list[str]]) -> None:
         query = params.get("q", [""])[0].strip().casefold()
         practice_filter = _entity_name_key(params.get("practice", [""])[0])
         department_filter = _entity_name_key(params.get("department", [""])[0])
         locality_filter = _entity_name_key(params.get("locality", [""])[0])
+        license_filter = params.get("license", [""])[0]
+        status_filter = params.get("status", [""])[0]
         offset, limit = parse_pagination(params)
         areas, warnings = _entity_areas()
+        areas_by_path = {area["relative_path"]: area for area in areas}
+        # Contadores por área: document_count, imported_count, has_license, estados.
+        area_counts = {path: [0, 0, False, set()] for path in areas_by_path}
         connection = connect_db()
         try:
-            area_counts = {}
-            for area in areas:
-                lower, upper = _catalog_path_bounds(area["relative_path"])
-                count = connection.execute(
-                    "SELECT COUNT(*) AS document_count, "
-                    "SUM(CASE WHEN license.source_path IS NOT NULL THEN 1 ELSE 0 END) "
-                    "AS imported_count FROM file_catalog AS file "
-                    "LEFT JOIN entity_licenses AS license ON license.source_path = file.path "
-                    "WHERE file.root = 'entities' AND file.path >= ? AND file.path < ?",
-                    (lower, upper),
-                ).fetchone()
-                area_counts[area["relative_path"]] = (
-                    count["document_count"],
-                    count["imported_count"] or 0,
-                )
+            rows = connection.execute(
+                "SELECT file.path, substr(upper(file.name), 1, 2) = 'LO' AS is_license, "
+                "license.source_path, license.expiry_date "
+                "FROM file_catalog AS file LEFT JOIN entity_licenses AS license "
+                "ON license.source_path = file.path "
+                "WHERE file.root = 'entities'"
+            ).fetchall()
         finally:
             connection.close()
+        for row in rows:
+            parts = row["path"].split("/")
+            counts = next(
+                (area_counts["/".join(parts[:index])]
+                 for index in range(len(parts) - 1, 0, -1)
+                 if "/".join(parts[:index]) in area_counts),
+                None,
+            )
+            if counts is None:
+                continue
+            counts[0] += 1
+            if row["is_license"]:
+                counts[2] = True
+                if row["source_path"] is None:
+                    counts[3].add("pending")
+                else:
+                    counts[1] += 1
+                    counts[3].add(_operation_license_status(row["expiry_date"]))
 
         entities: dict[str, dict] = {}
         for area in areas:
@@ -379,14 +567,20 @@ class EntityRoutes:
                 "name": area["institution"],
                 "document_count": 0,
                 "imported_count": 0,
+                "has_license": False,
+                "license_statuses": set(),
                 "practices": set(),
                 "departments": set(),
                 "localities": set(),
                 "area_count": 0,
             })
-            document_count, imported_count = area_counts[area["relative_path"]]
+            document_count, imported_count, has_license, license_statuses = (
+                area_counts[area["relative_path"]]
+            )
             entity["document_count"] += document_count
             entity["area_count"] += 1
+            entity["has_license"] = entity["has_license"] or has_license
+            entity["license_statuses"].update(license_statuses)
             entity["practices"].add(area["practice"])
             entity["departments"].add(area["department"])
             if area["locality"]:
@@ -401,6 +595,7 @@ class EntityRoutes:
             entity["practices"] = sorted(entity["practices"], key=str.casefold)
             entity["departments"] = sorted(entity["departments"], key=str.casefold)
             entity["localities"] = sorted(entity["localities"], key=str.casefold)
+            entity["license_statuses"] = sorted(entity["license_statuses"])
             practices.update(entity["practices"])
             departments.update(entity["departments"])
             localities.update(entity["localities"])
@@ -426,9 +621,17 @@ class EntityRoutes:
                 _entity_name_key(value) for value in entity["localities"]
             }:
                 continue
+            if license_filter == "with" and not entity["has_license"]:
+                continue
+            if license_filter == "without" and entity["has_license"]:
+                continue
+            if status_filter and status_filter not in entity["license_statuses"]:
+                continue
             items.append(entity)
         items.sort(key=lambda entity: entity["name"].casefold())
         total = len(items)
+        if params.get("all", [""])[0] == "1":
+            offset, limit = 0, total
         self.send_json({
             "items": items[offset:offset + limit],
             "total": total,
@@ -460,24 +663,76 @@ class EntityRoutes:
             )
             if area is None:
                 raise ValueError("El área solicitada no pertenece a esta institución.")
-            offset, limit = parse_pagination(params, default_limit=50, max_limit=100)
             lower, upper = _catalog_path_bounds(requested_area)
             connection = connect_db()
             try:
+                if params.get("folders_only", [""])[0] == "1":
+                    folders = _entity_file_groups(
+                        connection,
+                        requested_area,
+                        lower,
+                        upper,
+                    )
+                    return self.send_json({
+                        "folders": folders,
+                        "total": sum(folder["document_count"] for folder in folders),
+                    })
+
+                offset, limit = parse_pagination(params, default_limit=50, max_limit=100)
+                root_only = params.get("root", [""])[0] == "1"
+                if root_only and "folder" in params:
+                    raise ValueError("La carpeta solicitada no es válida.")
+                conditions = [
+                    "root = 'entities'",
+                    "path >= ?",
+                    "path < ?",
+                ]
+                file_conditions = [
+                    "file.root = 'entities'",
+                    "file.path >= ?",
+                    "file.path < ?",
+                ]
+                values: list[object] = [lower, upper]
+                if root_only:
+                    conditions.append("instr(substr(path, length(?) + 2), '/') = 0")
+                    file_conditions.append(
+                        "instr(substr(file.path, length(?) + 2), '/') = 0"
+                    )
+                    values.append(requested_area)
+                elif "folder" in params:
+                    folder = params.get("folder", [""])[0]
+                    if (
+                        not folder
+                        or folder in {".", ".."}
+                        or "/" in folder
+                        or "\\" in folder
+                        or "\x00" in folder
+                    ):
+                        raise ValueError("La subcarpeta solicitada no es válida.")
+                    group_lower, group_upper = _catalog_path_bounds(
+                        f"{requested_area}/{folder}"
+                    )
+                    conditions[1] = "path >= ?"
+                    conditions[2] = "path < ?"
+                    file_conditions[1] = "file.path >= ?"
+                    file_conditions[2] = "file.path < ?"
+                    values[0:2] = [group_lower, group_upper]
+                where = " AND ".join(conditions)
+                file_where = " AND ".join(file_conditions)
                 total = connection.execute(
-                    "SELECT COUNT(*) FROM file_catalog "
-                    "WHERE root = 'entities' AND path >= ? AND path < ?",
-                    (lower, upper),
+                    f"SELECT COUNT(*) FROM file_catalog WHERE {where}",
+                    values,
                 ).fetchone()[0]
                 rows = connection.execute(
                     "SELECT file.path, file.name, file.extension, file.size, "
                     "file.modified_ns, file.created_ns, license.license_number "
                     "FROM file_catalog AS file LEFT JOIN entity_licenses AS license "
-                    "ON license.source_path = file.path "
-                    "WHERE file.root = 'entities' AND file.path >= ? AND file.path < ? "
-                    "ORDER BY file.created_ns DESC, file.path COLLATE NOCASE "
+                    "ON license.source_path = file.path WHERE "
+                    + file_where
+                    + " "
+                    "ORDER BY file.path COLLATE NOCASE "
                     "LIMIT ? OFFSET ?",
-                    (lower, upper, limit, offset),
+                    (*values, limit, offset),
                 ).fetchall()
             finally:
                 connection.close()
@@ -491,9 +746,17 @@ class EntityRoutes:
                     .strftime("%Y-%m-%d %H:%M"),
                     "created": datetime.fromtimestamp(row["created_ns"] / 1_000_000_000)
                     .strftime("%Y-%m-%d %H:%M"),
-                    "can_import": row["extension"] in IMPORTABLE_EXTENSIONS,
+                    "can_import": (
+                        row["extension"] in IMPORTABLE_EXTENSIONS
+                        and _is_operation_license_file(row["name"])
+                    ),
                     "can_preview": row["extension"] in PREVIEWABLE_EXTENSIONS,
-                    "license_number": row["license_number"] or "",
+                    "is_technical_opinion": _is_technical_opinion_file(row["name"]),
+                    "license_number": (
+                        row["license_number"] or ""
+                        if _is_operation_license_file(row["name"])
+                        else ""
+                    ),
                 } for row in rows],
                 "total": total,
                 "offset": offset,
@@ -507,7 +770,8 @@ class EntityRoutes:
                 lower, upper = _catalog_path_bounds(area["relative_path"])
                 count = connection.execute(
                     "SELECT COUNT(*) AS document_count, "
-                    "SUM(CASE WHEN license.source_path IS NOT NULL THEN 1 ELSE 0 END) "
+                    "SUM(CASE WHEN license.source_path IS NOT NULL "
+                    "AND substr(upper(file.name), 1, 2) = 'LO' THEN 1 ELSE 0 END) "
                     "AS imported_count FROM file_catalog AS file "
                     "LEFT JOIN entity_licenses AS license ON license.source_path = file.path "
                     "WHERE file.root = 'entities' AND file.path >= ? AND file.path < ?",
@@ -520,15 +784,29 @@ class EntityRoutes:
                 licenses = connection.execute(
                     "SELECT license.license_number, license.representative, "
                     "license.authorization_number, license.issue_date, license.expiry_date, "
+                    "license.technical_tables, "
                     "file.path, file.name "
                     "FROM file_catalog AS file JOIN entity_licenses AS license "
                     "ON license.source_path = file.path "
-                    "WHERE file.root = 'entities' AND file.path >= ? AND file.path < ?",
+                    "WHERE file.root = 'entities' AND file.path >= ? AND file.path < ? "
+                    "AND substr(upper(file.name), 1, 2) = 'LO'",
+                    (lower, upper),
+                ).fetchall()
+                technical_opinions = connection.execute(
+                    "SELECT path, name, extension FROM file_catalog "
+                    "WHERE root = 'entities' AND path >= ? AND path < ? "
+                    "AND substr(upper(name), 1, 2) = 'DT' "
+                    "ORDER BY path COLLATE NOCASE",
                     (lower, upper),
                 ).fetchall()
                 area_counts[area["relative_path"]] += (
                     sorted({row["license_number"] for row in licenses}),
                     [dict(row) for row in licenses],
+                    [{
+                        "path": row["path"],
+                        "name": row["name"],
+                        "can_preview": row["extension"] in PREVIEWABLE_EXTENSIONS,
+                    } for row in technical_opinions],
                 )
         finally:
             connection.close()
@@ -539,9 +817,13 @@ class EntityRoutes:
         document_count = 0
         imported_count = 0
         for area in matched_areas:
-            area_document_count, area_imported_count, area_licenses, area_cards = (
-                area_counts[area["relative_path"]]
-            )
+            (
+                area_document_count,
+                area_imported_count,
+                area_licenses,
+                area_cards,
+                technical_opinions,
+            ) = area_counts[area["relative_path"]]
             document_count += area_document_count
             imported_count += area_imported_count
             practice_key = _entity_name_key(area["practice"])
@@ -559,6 +841,7 @@ class EntityRoutes:
                 "path": area["relative_path"],
                 "document_count": area_document_count,
                 "imported_count": area_imported_count,
+                "technical_opinions": technical_opinions,
                 "licenses": area_licenses,
                 "files": [],
             })
@@ -598,7 +881,13 @@ class EntityRoutes:
         if not isinstance(relative, str):
             raise ValueError("Falta la ruta del archivo.")
         path, relative = safe_relative_path(relative, ENTITY_ROOT)
-        text = _extract_text(path)
+        if not _is_operation_license_file(path.name):
+            return self.send_error_json(
+                "Solo los archivos cuyo nombre comienza con LO son licencias de operación. "
+                "Los archivos DT son dictámenes técnicos.",
+                422,
+            )
+        text, technical_tables = _extract_license_content(path)
         if not text.strip():
             return self.send_error_json(
                 "Este archivo no contiene texto utilizable. Si es un escaneo, se necesitaría OCR.",
@@ -612,7 +901,7 @@ class EntityRoutes:
                 "No se encontró una licencia con formato LO-X-XXXX-XXXX-XX en el documento.",
                 422,
             )
-        updated = _save_license(relative, license_number, extract_license_details(text))
+        updated = _save_license(relative, license_number, extract_license_details(text), technical_tables)
         self.send_json({"path": relative, "license_number": license_number, "updated": updated})
 
     def start_entity_import(self) -> None:
@@ -665,7 +954,7 @@ class EntityRoutes:
             content = path.read_bytes()
             content_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
         else:
-            raise ValueError("Este formato se puede descargar, pero no previsualizar.")
+            raise ValueError("Este formato no se puede previsualizar.")
         self.send_response(200)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(content)))
@@ -675,38 +964,27 @@ class EntityRoutes:
         self.end_headers()
         self.wfile.write(content)
 
-    def entity_download(self, params: dict[str, list[str]]) -> None:
-        path, _ = safe_relative_path(params.get("path", [""])[0], ENTITY_ROOT)
-        self.send_response(200)
-        self.send_header("Content-Type", mimetypes.guess_type(path.name)[0] or "application/octet-stream")
-        self.send_header("Content-Length", str(path.stat().st_size))
-        self.send_header("Content-Disposition", f"attachment; filename*=UTF-8''{quote(path.name)}")
-        self.send_header("X-Content-Type-Options", "nosniff")
-        self.end_headers()
-        with path.open("rb") as source:
-            shutil.copyfileobj(source, self.wfile)
-
     def open_entity_location(self, data: dict) -> None:
         relative = data.get("path")
         if not isinstance(relative, str):
             raise ValueError("Falta la ruta del archivo.")
         if os.name != "nt":
-            raise RuntimeError("Abrir una ubicación en el Explorador requiere Windows.")
+            raise AppError("Abrir una ubicación en el Explorador requiere Windows.")
         path, relative = safe_relative_path(relative, ENTITY_ROOT)
         try:
             subprocess.Popen(["explorer.exe", "/select,", str(path)])
         except OSError as exc:
-            raise RuntimeError("No se pudo iniciar el Explorador de archivos.") from exc
+            raise AppError("No se pudo iniciar el Explorador de archivos.") from exc
         self.send_json({"opened": True, "path": relative}, 202)
 
     def open_entity_folder(self, data: dict) -> None:
         folder = _entity_area_folder(data.get("path"))
         if os.name != "nt":
-            raise RuntimeError("Abrir una carpeta en el Explorador requiere Windows.")
+            raise AppError("Abrir una carpeta en el Explorador requiere Windows.")
         try:
             subprocess.Popen(["explorer.exe", str(folder)])
         except OSError as exc:
-            raise RuntimeError("No se pudo iniciar el Explorador de archivos.") from exc
+            raise AppError("No se pudo iniciar el Explorador de archivos.") from exc
         self.send_json({
             "opened": True,
             "path": folder.relative_to(ENTITY_ROOT).as_posix(),

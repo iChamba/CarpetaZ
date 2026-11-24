@@ -1,26 +1,86 @@
 import sqlite3
+from datetime import datetime, timezone
 
 from settings import DATABASE, INDEX_STATE, INDEX_STATE_LOCK
+
+ENTITY_WORKFLOW_NAMES = (
+    "Licencia de Operación",
+    "Licencia de Construcción",
+    "Comercialización y servicio",
+    "Autorización de transporte",
+)
 
 
 def connect_db() -> sqlite3.Connection:
     connection = sqlite3.connect(DATABASE, timeout=30)
     connection.row_factory = sqlite3.Row
+    # Con WAL, NORMAL evita sincronizar el disco en cada commit sin arriesgar
+    # la integridad de la base (solo puede perderse el último commit ante un corte de luz).
+    connection.execute("PRAGMA synchronous=NORMAL")
     return connection
+
+
+def _create_inspections_table(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        "CREATE TABLE IF NOT EXISTS inspections ("
+        "id INTEGER PRIMARY KEY, inspector_id INTEGER REFERENCES workflow_users(id), "
+        "created_by INTEGER NOT NULL REFERENCES workflow_users(id), created_at TEXT NOT NULL, "
+        "application_date TEXT NOT NULL DEFAULT '', case_number TEXT NOT NULL DEFAULT '', "
+        "company_name TEXT NOT NULL DEFAULT '', rut TEXT NOT NULL DEFAULT '', "
+        "request_type TEXT NOT NULL DEFAULT '', inspection_type TEXT NOT NULL DEFAULT '', "
+        "practice TEXT NOT NULL DEFAULT '', equipment_model TEXT NOT NULL DEFAULT '', "
+        "contact_details TEXT NOT NULL DEFAULT '', phone TEXT NOT NULL DEFAULT '', "
+        "address TEXT NOT NULL DEFAULT '', city TEXT NOT NULL DEFAULT '', email TEXT NOT NULL DEFAULT '', "
+        "stage TEXT NOT NULL DEFAULT 'assignment', version INTEGER NOT NULL DEFAULT 0, "
+        "scheduled_date TEXT NOT NULL DEFAULT '', scheduled_time TEXT NOT NULL DEFAULT '', "
+        "scheduled_place TEXT NOT NULL DEFAULT '', pre_checklist TEXT NOT NULL DEFAULT '[]', "
+        "post_checklist TEXT NOT NULL DEFAULT '[]')"
+    )
+
+
+def _initialize_inspections(connection: sqlite3.Connection) -> None:
+    columns = {row["name"]: row for row in connection.execute("PRAGMA table_info(inspections)")}
+    if columns and columns["inspector_id"]["notnull"]:
+        connection.execute("SAVEPOINT migrate_inspections")
+        try:
+            connection.execute("ALTER TABLE inspections RENAME TO inspections_legacy")
+            _create_inspections_table(connection)
+            fields = (
+                "id, inspector_id, created_by, created_at, application_date, case_number, "
+                "company_name, rut, request_type, inspection_type, practice, equipment_model, "
+                "contact_details, phone, address, city, email"
+            )
+            connection.execute(
+                f"INSERT INTO inspections ({fields}, stage) "
+                f"SELECT {fields}, 'pre_inspection' FROM inspections_legacy"
+            )
+            connection.execute("DROP TABLE inspections_legacy")
+            connection.execute("RELEASE SAVEPOINT migrate_inspections")
+        except Exception:
+            connection.execute("ROLLBACK TO SAVEPOINT migrate_inspections")
+            connection.execute("RELEASE SAVEPOINT migrate_inspections")
+            raise
+    else:
+        _create_inspections_table(connection)
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_inspections_inspector ON inspections(inspector_id)"
+    )
+    connection.execute(
+        "CREATE TABLE IF NOT EXISTS inspection_events ("
+        "id INTEGER PRIMARY KEY, inspection_id INTEGER NOT NULL REFERENCES inspections(id), "
+        "actor_id INTEGER NOT NULL REFERENCES workflow_users(id), "
+        "action TEXT NOT NULL, comment TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL)"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_inspection_events_inspection "
+        "ON inspection_events(inspection_id, id)"
+    )
 
 
 def initialize_db() -> None:
     connection = connect_db()
     try:
         connection.execute("PRAGMA journal_mode=WAL")
-        connection.execute(
-            "CREATE VIRTUAL TABLE IF NOT EXISTS pdf_fts "
-            "USING fts5(path UNINDEXED, content, tokenize='unicode61')"
-        )
-        connection.execute(
-            "CREATE TABLE IF NOT EXISTS pdf_index_meta ("
-            "path TEXT PRIMARY KEY, size INTEGER NOT NULL, modified_ns INTEGER NOT NULL)"
-        )
         connection.execute(
             "CREATE TABLE IF NOT EXISTS file_catalog ("
             "root TEXT NOT NULL, path TEXT NOT NULL, name TEXT NOT NULL, "
@@ -62,11 +122,19 @@ def initialize_db() -> None:
             "needs_review INTEGER NOT NULL DEFAULT 1)"
         )
         connection.execute(
+            "CREATE TABLE IF NOT EXISTS certificate_import_cache ("
+            "root TEXT NOT NULL, path TEXT NOT NULL, size INTEGER NOT NULL, "
+            "modified_ns INTEGER NOT NULL, parser_version INTEGER NOT NULL, "
+            "outcome TEXT NOT NULL CHECK(outcome IN ('certificate', 'other', 'without_text')), "
+            "PRIMARY KEY(root, path))"
+        )
+        connection.execute(
             "CREATE TABLE IF NOT EXISTS entity_licenses ("
             "source_path TEXT PRIMARY KEY, created_at TEXT NOT NULL, "
             "license_number TEXT NOT NULL, representative TEXT NOT NULL DEFAULT '', "
             "authorization_number TEXT NOT NULL DEFAULT '', "
-            "issue_date TEXT NOT NULL DEFAULT '', expiry_date TEXT NOT NULL DEFAULT '')"
+            "issue_date TEXT NOT NULL DEFAULT '', expiry_date TEXT NOT NULL DEFAULT '', "
+            "technical_tables TEXT)"
         )
         license_columns = {
             row["name"]
@@ -77,6 +145,8 @@ def initialize_db() -> None:
                 connection.execute(
                     f"ALTER TABLE entity_licenses ADD COLUMN {column} TEXT NOT NULL DEFAULT ''"
                 )
+        if "technical_tables" not in license_columns:
+            connection.execute("ALTER TABLE entity_licenses ADD COLUMN technical_tables TEXT")
         columns = {
             row["name"]
             for row in connection.execute("PRAGMA table_info(extracted_records)")
@@ -91,6 +161,133 @@ def initialize_db() -> None:
                 "ALTER TABLE extracted_records ADD COLUMN "
                 "is_authorization_certificate INTEGER NOT NULL DEFAULT 0"
             )
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS workflow_users ("
+            "id INTEGER PRIMARY KEY, username TEXT NOT NULL UNIQUE COLLATE NOCASE, "
+            "display_name TEXT NOT NULL, password_hash TEXT NOT NULL, "
+            "role TEXT NOT NULL CHECK(role IN ('admin', 'user')), "
+            "workflow_role TEXT NOT NULL DEFAULT '', "
+            "active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL)"
+        )
+        user_columns = {
+            row["name"] for row in connection.execute("PRAGMA table_info(workflow_users)")
+        }
+        if "workflow_role" not in user_columns:
+            connection.execute(
+                "ALTER TABLE workflow_users ADD COLUMN workflow_role TEXT NOT NULL DEFAULT ''"
+            )
+        _initialize_inspections(connection)
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS workflow_sessions ("
+            "token_hash TEXT PRIMARY KEY, user_id INTEGER NOT NULL, "
+            "expires_at TEXT NOT NULL)"
+        )
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS workflow_groups ("
+            "id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE COLLATE NOCASE, "
+            "created_at TEXT NOT NULL)"
+        )
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS workflow_group_members ("
+            "group_id INTEGER NOT NULL, user_id INTEGER NOT NULL, "
+            "PRIMARY KEY(group_id, user_id))"
+        )
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS workflow_definitions ("
+            "id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE COLLATE NOCASE, "
+            "description TEXT NOT NULL DEFAULT '', version INTEGER NOT NULL DEFAULT 1, "
+            "active INTEGER NOT NULL DEFAULT 1, created_by INTEGER, created_at TEXT NOT NULL)"
+        )
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS workflow_stages ("
+            "id INTEGER PRIMARY KEY, workflow_id INTEGER NOT NULL, stage_key TEXT NOT NULL, "
+            "name TEXT NOT NULL, position INTEGER NOT NULL, "
+            "default_assignee_user_id INTEGER, default_assignee_group_id INTEGER, "
+            "UNIQUE(workflow_id, stage_key), UNIQUE(workflow_id, position))"
+        )
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS workflow_transitions ("
+            "id INTEGER PRIMARY KEY, workflow_id INTEGER NOT NULL, "
+            "from_stage_id INTEGER NOT NULL, to_stage_id INTEGER NOT NULL, "
+            "label TEXT NOT NULL, UNIQUE(from_stage_id, to_stage_id, label))"
+        )
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS workflow_cases ("
+            "id INTEGER PRIMARY KEY, workflow_id INTEGER NOT NULL, "
+            "workflow_version INTEGER NOT NULL, title TEXT NOT NULL, reference TEXT NOT NULL DEFAULT '', "
+            "description TEXT NOT NULL DEFAULT '', request_type TEXT NOT NULL DEFAULT '', "
+            "linked_user_name TEXT NOT NULL DEFAULT '', "
+            "linked_document_path TEXT NOT NULL DEFAULT '', current_stage_id INTEGER NOT NULL, "
+            "assigned_user_id INTEGER, assigned_group_id INTEGER, claimed_by_user_id INTEGER, "
+            "status TEXT NOT NULL CHECK(status IN ('active', 'completed')), "
+            "created_by INTEGER NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, "
+            "entered_stage_at TEXT NOT NULL, completed_at TEXT, delivered_at TEXT, delivered_by INTEGER, "
+            "delivery_method TEXT)"
+        )
+        case_columns = {
+            row["name"] for row in connection.execute("PRAGMA table_info(workflow_cases)")
+        }
+        if "request_type" not in case_columns:
+            connection.execute(
+                "ALTER TABLE workflow_cases ADD COLUMN request_type TEXT NOT NULL DEFAULT ''"
+            )
+        if "delivered_at" not in case_columns:
+            connection.execute("ALTER TABLE workflow_cases ADD COLUMN delivered_at TEXT")
+        if "delivered_by" not in case_columns:
+            connection.execute("ALTER TABLE workflow_cases ADD COLUMN delivered_by INTEGER")
+        if "delivery_method" not in case_columns:
+            connection.execute("ALTER TABLE workflow_cases ADD COLUMN delivery_method TEXT")
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS workflow_case_application_data ("
+            "case_id INTEGER PRIMARY KEY REFERENCES workflow_cases(id) ON DELETE CASCADE, "
+            "application_date TEXT NOT NULL, form_number TEXT NOT NULL, short_code TEXT NOT NULL, "
+            "first_name TEXT NOT NULL, last_name TEXT NOT NULL, identity_number TEXT NOT NULL, "
+            "profession TEXT NOT NULL, practice TEXT NOT NULL, workplace TEXT NOT NULL, "
+            "email TEXT NOT NULL, assigned_code TEXT NOT NULL, "
+            "digital_signature INTEGER NOT NULL CHECK(digital_signature IN (0, 1)))"
+        )
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS workflow_entity_types ("
+            "workflow_id INTEGER PRIMARY KEY REFERENCES workflow_definitions(id))"
+        )
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS workflow_case_entity_data ("
+            "case_id INTEGER PRIMARY KEY REFERENCES workflow_cases(id) ON DELETE CASCADE, "
+            "application_date TEXT NOT NULL, form_number TEXT NOT NULL, "
+            "company_name TEXT NOT NULL, practice TEXT NOT NULL, code TEXT NOT NULL, "
+            "digital_signature INTEGER NOT NULL CHECK(digital_signature IN (0, 1)), "
+            "linked_entity_name TEXT NOT NULL DEFAULT '')"
+        )
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS workflow_case_stage_assignments ("
+            "case_id INTEGER NOT NULL, stage_id INTEGER NOT NULL, "
+            "user_id INTEGER, group_id INTEGER, PRIMARY KEY(case_id, stage_id))"
+        )
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS workflow_events ("
+            "id INTEGER PRIMARY KEY, case_id INTEGER NOT NULL, actor_id INTEGER NOT NULL, "
+            "event_type TEXT NOT NULL, from_stage_id INTEGER, to_stage_id INTEGER, "
+            "from_assigned_user_id INTEGER, from_assigned_group_id INTEGER, "
+            "to_assigned_user_id INTEGER, to_assigned_group_id INTEGER, "
+            "comment TEXT NOT NULL DEFAULT '', duration_seconds INTEGER, created_at TEXT NOT NULL)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_workflow_cases_status "
+            "ON workflow_cases(status, updated_at DESC)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_workflow_events_case "
+            "ON workflow_events(case_id, id)"
+        )
+        from auth import bootstrap_admin
+
+        bootstrap_admin(connection)
+        _seed_authorization_workflow(connection)
+        _ensure_authorization_returns(connection)
+        _ensure_inspector_assignment_stage(connection)
+        _ensure_return_to_assigned_inspector(connection)
+        _ensure_inspection_rejection(connection)
+        _seed_entity_workflows(connection)
         catalog_ready = connection.execute(
             "SELECT 1 FROM file_catalog_state WHERE root = 'documents'"
         ).fetchone() is not None
@@ -99,3 +296,315 @@ def initialize_db() -> None:
         connection.commit()
     finally:
         connection.close()
+
+
+def _seed_authorization_workflow(connection: sqlite3.Connection) -> None:
+    if connection.execute(
+        "SELECT 1 FROM workflow_definitions LIMIT 1"
+    ).fetchone():
+        return
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    admin = connection.execute(
+        "SELECT id FROM workflow_users WHERE role = 'admin' ORDER BY id LIMIT 1"
+    ).fetchone()
+    cursor = connection.execute(
+        "INSERT INTO workflow_definitions "
+        "(name, description, version, active, created_by, created_at) "
+        "VALUES (?, ?, 1, 1, ?, ?)",
+        (
+            "Autorización Individual",
+            "Flujo inicial para tramitar una autorización individual.",
+            admin["id"] if admin else None,
+            now,
+        ),
+    )
+    workflow_id = cursor.lastrowid
+    stages = [
+        ("carga_datos", "Carga de datos"),
+        ("evaluacion_inspector", "Evaluación del inspector"),
+        ("jefe_licenciamiento", "Jefe de licenciamiento"),
+        ("abogado", "Abogado"),
+        ("director", "Director"),
+        ("finalizado", "Finalizado"),
+    ]
+    stage_ids = {}
+    for position, (stage_key, name) in enumerate(stages, start=1):
+        cursor = connection.execute(
+            "INSERT INTO workflow_stages (workflow_id, stage_key, name, position) "
+            "VALUES (?, ?, ?, ?)",
+            (workflow_id, stage_key, name, position),
+        )
+        stage_ids[stage_key] = cursor.lastrowid
+    transitions = [
+        ("carga_datos", "evaluacion_inspector", "Enviar a evaluación del inspector"),
+        ("evaluacion_inspector", "carga_datos", "Observado: devolver a carga de datos"),
+        ("evaluacion_inspector", "jefe_licenciamiento", "Aprobado: enviar al jefe de licenciamiento"),
+        ("jefe_licenciamiento", "evaluacion_inspector", "Devolver a evaluación del inspector"),
+        ("jefe_licenciamiento", "abogado", "Enviar a abogado"),
+        ("abogado", "director", "Enviar a director"),
+        ("director", "finalizado", "Finalizar"),
+    ]
+    for source, target, label in transitions:
+        connection.execute(
+            "INSERT INTO workflow_transitions "
+            "(workflow_id, from_stage_id, to_stage_id, label) VALUES (?, ?, ?, ?)",
+            (workflow_id, stage_ids[source], stage_ids[target], label),
+        )
+
+
+def _seed_entity_workflows(connection: sqlite3.Connection) -> None:
+    source = connection.execute(
+        "SELECT id FROM workflow_definitions WHERE name = ?", ("Autorización Individual",),
+    ).fetchone()
+    if not source:
+        return
+    defaults = {
+        row["stage_key"]: (row["default_assignee_user_id"], row["default_assignee_group_id"])
+        for row in connection.execute(
+            "SELECT stage_key, default_assignee_user_id, default_assignee_group_id "
+            "FROM workflow_stages WHERE workflow_id = ?", (source["id"],),
+        )
+    }
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    admin = connection.execute(
+        "SELECT id FROM workflow_users WHERE role = 'admin' ORDER BY id LIMIT 1"
+    ).fetchone()
+    for name in ENTITY_WORKFLOW_NAMES:
+        existing = connection.execute(
+            "SELECT definitions.id, entity.workflow_id AS managed "
+            "FROM workflow_definitions AS definitions LEFT JOIN workflow_entity_types AS entity "
+            "ON entity.workflow_id = definitions.id WHERE definitions.name = ? COLLATE NOCASE",
+            (name,),
+        ).fetchone()
+        if existing:
+            if existing["managed"] is None:
+                raise ValueError(f"Ya existe un flujo con el nombre {name}; no se modificó.")
+            continue
+        workflow_id = connection.execute(
+            "INSERT INTO workflow_definitions "
+            "(name, description, version, active, created_by, created_at) VALUES (?, ?, 1, 1, ?, ?)",
+            (name, "Trámite de entidad con asignación directa a Inspección.",
+             admin["id"] if admin else None, now),
+        ).lastrowid
+        connection.execute("INSERT INTO workflow_entity_types (workflow_id) VALUES (?)", (workflow_id,))
+        stage_ids = {}
+        for position, (key, label) in enumerate((
+            ("carga_datos", "Carga de datos"),
+            ("evaluacion_inspector", "Evaluación del inspector"),
+            ("jefe_licenciamiento", "Jefe de licenciamiento"),
+            ("abogado", "Abogado"), ("director", "Director"),
+            ("finalizado", "Finalizado"), ("rechazado", "Rechazado"),
+        ), start=1):
+            user_id, group_id = defaults.get(key, (None, None))
+            stage_ids[key] = connection.execute(
+                "INSERT INTO workflow_stages (workflow_id, stage_key, name, position, "
+                "default_assignee_user_id, default_assignee_group_id) VALUES (?, ?, ?, ?, ?, ?)",
+                (workflow_id, key, label, position, user_id, group_id),
+            ).lastrowid
+        for source_key, target_key, label in (
+            ("carga_datos", "evaluacion_inspector", "Enviar al funcionario de Inspección"),
+            ("evaluacion_inspector", "carga_datos", "Observado: devolver a Secretaría"),
+            ("evaluacion_inspector", "jefe_licenciamiento", "Aprobado: enviar al jefe de licenciamiento"),
+            ("evaluacion_inspector", "rechazado", "Rechazado: finalizar trámite"),
+            ("jefe_licenciamiento", "evaluacion_inspector", "Devolver a evaluación del inspector"),
+            ("jefe_licenciamiento", "abogado", "Enviar a abogado"),
+            ("abogado", "jefe_licenciamiento", "Devolver a Jefe de Licenciamiento"),
+            ("abogado", "director", "Enviar a director"),
+            ("director", "evaluacion_inspector", "Devolver a Inspección"),
+            ("director", "jefe_licenciamiento", "Devolver a Jefe de Licenciamiento"),
+            ("director", "finalizado", "Finalizar"),
+        ):
+            connection.execute(
+                "INSERT INTO workflow_transitions (workflow_id, from_stage_id, to_stage_id, label) "
+                "VALUES (?, ?, ?, ?)", (workflow_id, stage_ids[source_key], stage_ids[target_key], label),
+            )
+
+
+def _ensure_inspection_rejection(connection: sqlite3.Connection) -> None:
+    workflow = connection.execute(
+        "SELECT id FROM workflow_definitions WHERE name = ?", ("Autorización Individual",),
+    ).fetchone()
+    if not workflow:
+        return
+    stages = {
+        row["stage_key"]: row["id"]
+        for row in connection.execute(
+            "SELECT id, stage_key FROM workflow_stages WHERE workflow_id = ?", (workflow["id"],),
+        )
+    }
+    if "evaluacion_inspector" not in stages:
+        raise ValueError("El flujo de Autorización Individual no tiene etapa de Inspección.")
+    changed = False
+    if "rechazado" not in stages:
+        position = connection.execute(
+            "SELECT COALESCE(MAX(position), 0) + 1 FROM workflow_stages WHERE workflow_id = ?",
+            (workflow["id"],),
+        ).fetchone()[0]
+        stages["rechazado"] = connection.execute(
+            "INSERT INTO workflow_stages (workflow_id, stage_key, name, position) VALUES (?, ?, ?, ?)",
+            (workflow["id"], "rechazado", "Rechazado", position),
+        ).lastrowid
+        changed = True
+    if not connection.execute(
+        "SELECT 1 FROM workflow_transitions WHERE workflow_id = ? AND from_stage_id = ? AND to_stage_id = ?",
+        (workflow["id"], stages["evaluacion_inspector"], stages["rechazado"]),
+    ).fetchone():
+        connection.execute(
+            "INSERT INTO workflow_transitions (workflow_id, from_stage_id, to_stage_id, label) "
+            "VALUES (?, ?, ?, ?)",
+            (workflow["id"], stages["evaluacion_inspector"], stages["rechazado"],
+             "Rechazado: finalizar trámite"),
+        )
+        changed = True
+    if changed:
+        connection.execute(
+            "UPDATE workflow_definitions SET version = version + 1 WHERE id = ?", (workflow["id"],),
+        )
+
+
+def _ensure_return_to_assigned_inspector(connection: sqlite3.Connection) -> None:
+    workflow = connection.execute(
+        "SELECT id FROM workflow_definitions WHERE name = ?",
+        ("Autorización Individual",),
+    ).fetchone()
+    if not workflow:
+        return
+    stages = {
+        row["stage_key"]: row["id"]
+        for row in connection.execute(
+            "SELECT id, stage_key FROM workflow_stages WHERE workflow_id = ?",
+            (workflow["id"],),
+        )
+    }
+    if not all(key in stages for key in ("carga_datos", "evaluacion_inspector")):
+        return
+    if not connection.execute(
+        "SELECT 1 FROM workflow_transitions WHERE workflow_id = ? "
+        "AND from_stage_id = ? AND to_stage_id = ?",
+        (workflow["id"], stages["carga_datos"], stages["evaluacion_inspector"]),
+    ).fetchone():
+        connection.execute(
+            "INSERT INTO workflow_transitions "
+            "(workflow_id, from_stage_id, to_stage_id, label) VALUES (?, ?, ?, ?)",
+            (workflow["id"], stages["carga_datos"], stages["evaluacion_inspector"],
+             "Enviar al funcionario de Inspección"),
+        )
+        connection.execute(
+            "UPDATE workflow_definitions SET version = version + 1 WHERE id = ?",
+            (workflow["id"],),
+        )
+
+
+def _ensure_authorization_returns(connection: sqlite3.Connection) -> None:
+    workflow = connection.execute(
+        "SELECT id FROM workflow_definitions WHERE name = ?",
+        ("Autorización Individual",),
+    ).fetchone()
+    if not workflow:
+        return
+    stages = {
+        row["stage_key"]: row["id"]
+        for row in connection.execute(
+            "SELECT id, stage_key FROM workflow_stages WHERE workflow_id = ?",
+            (workflow["id"],),
+        )
+    }
+    changed = False
+    if "abogado" in stages and "evaluacion_inspector" in stages:
+        deleted = connection.execute(
+            "DELETE FROM workflow_transitions WHERE workflow_id = ? "
+            "AND from_stage_id = ? AND to_stage_id = ?",
+            (workflow["id"], stages["abogado"], stages["evaluacion_inspector"]),
+        )
+        changed = deleted.rowcount > 0
+    for source, target, label in (
+        ("abogado", "jefe_licenciamiento", "Devolver a Jefe de Licenciamiento"),
+        ("director", "evaluacion_inspector", "Devolver a Inspección"),
+        ("director", "jefe_licenciamiento", "Devolver a Jefe de Licenciamiento"),
+    ):
+        if source not in stages or target not in stages:
+            continue
+        if not connection.execute(
+            "SELECT 1 FROM workflow_transitions WHERE workflow_id = ? "
+            "AND from_stage_id = ? AND to_stage_id = ?",
+            (workflow["id"], stages[source], stages[target]),
+        ).fetchone():
+            connection.execute(
+                "INSERT INTO workflow_transitions "
+                "(workflow_id, from_stage_id, to_stage_id, label) VALUES (?, ?, ?, ?)",
+                (workflow["id"], stages[source], stages[target], label),
+            )
+            changed = True
+    if changed:
+        connection.execute(
+            "UPDATE workflow_definitions SET version = version + 1 WHERE id = ?",
+            (workflow["id"],),
+        )
+
+
+def _ensure_inspector_assignment_stage(connection: sqlite3.Connection) -> None:
+    workflow = connection.execute(
+        "SELECT id FROM workflow_definitions WHERE name = ?",
+        ("Autorización Individual",),
+    ).fetchone()
+    if not workflow:
+        return
+    stages = {
+        row["stage_key"]: row
+        for row in connection.execute(
+            "SELECT id, stage_key, position, default_assignee_user_id, "
+            "default_assignee_group_id FROM workflow_stages WHERE workflow_id = ?",
+            (workflow["id"],),
+        )
+    }
+    if "asignacion_inspector" in stages:
+        return
+    if not all(key in stages for key in ("carga_datos", "evaluacion_inspector", "jefe_licenciamiento")):
+        raise ValueError("El flujo de Autorización Individual no tiene las etapas esperadas.")
+    start = stages["carga_datos"]
+    inspection = stages["evaluacion_inspector"]
+    chief = stages["jefe_licenciamiento"]
+    routes = connection.execute(
+        "SELECT id FROM workflow_transitions WHERE workflow_id = ? "
+        "AND from_stage_id = ? AND to_stage_id = ?",
+        (workflow["id"], start["id"], inspection["id"]),
+    ).fetchall()
+    if len(routes) != 1:
+        raise ValueError("No se pudo actualizar la transición inicial de Autorización Individual.")
+    for stage in sorted(stages.values(), key=lambda row: row["position"], reverse=True):
+        if stage["position"] >= inspection["position"]:
+            connection.execute(
+                "UPDATE workflow_stages SET position = ? WHERE id = ?",
+                (stage["position"] + 1, stage["id"]),
+            )
+    assignment_id = connection.execute(
+        "INSERT INTO workflow_stages "
+        "(workflow_id, stage_key, name, position, default_assignee_user_id, default_assignee_group_id) "
+        "VALUES (?, 'asignacion_inspector', ?, ?, ?, ?)",
+        (workflow["id"], "Jefe de licenciamiento: asignación de funcionario",
+         inspection["position"], chief["default_assignee_user_id"], chief["default_assignee_group_id"]),
+    ).lastrowid
+    connection.execute(
+        "UPDATE workflow_transitions SET to_stage_id = ?, label = ? WHERE id = ?",
+        (assignment_id, "Enviar al jefe para asignar funcionario", routes[0]["id"]),
+    )
+    connection.execute(
+        "INSERT INTO workflow_transitions (workflow_id, from_stage_id, to_stage_id, label) "
+        "VALUES (?, ?, ?, ?)",
+        (workflow["id"], assignment_id, inspection["id"], "Asignar y enviar a Inspección"),
+    )
+    connection.execute(
+        "INSERT INTO workflow_case_stage_assignments (case_id, stage_id, user_id, group_id) "
+        "SELECT cases.id, ?, "
+        "CASE WHEN prior.case_id IS NULL THEN ? ELSE prior.user_id END, "
+        "CASE WHEN prior.case_id IS NULL THEN ? ELSE prior.group_id END "
+        "FROM workflow_cases AS cases LEFT JOIN workflow_case_stage_assignments AS prior "
+        "ON prior.case_id = cases.id AND prior.stage_id = ? "
+        "WHERE cases.workflow_id = ? AND cases.status = 'active'",
+        (assignment_id, chief["default_assignee_user_id"], chief["default_assignee_group_id"],
+         chief["id"], workflow["id"]),
+    )
+    connection.execute(
+        "UPDATE workflow_definitions SET version = version + 1 WHERE id = ?",
+        (workflow["id"],),
+    )

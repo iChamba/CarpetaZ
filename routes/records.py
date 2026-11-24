@@ -1,6 +1,4 @@
-import os
 import threading
-import time
 from datetime import datetime
 from io import BytesIO
 from pathlib import Path
@@ -9,22 +7,22 @@ from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.worksheet.table import Table, TableStyleInfo
 
+from catalog import iter_tree_files
 from database import connect_db
 from documents import (
     extract_legacy_doc_text,
-    extract_pdf_text,
     parse_docx,
     safe_relative_path,
     user_folder_from_path,
+    word_session,
 )
 from extraction import (
-    extract_authorization_certificate,
-    extract_candidate_fields,
     extract_certificate_fields,
     is_authorization_individual,
+    read_pdf_authorization,
     is_authorization_certificate,
 )
-from settings import APP_DATA, DOCUMENT_ROOT, INDEX_STATE, INDEX_STATE_LOCK
+from settings import APP_DATA, DOCUMENT_ROOT
 
 CERTIFICATE_IMPORT_LOCK = threading.Lock()
 CERTIFICATE_IMPORT_STATE_LOCK = threading.Lock()
@@ -35,12 +33,15 @@ CERTIFICATE_IMPORT_STATE = {
     "processed": 0,
     "imported": 0,
     "updated": 0,
+    "unchanged": 0,
     "without_text": 0,
     "errors": 0,
     "error_details": [],
     "message": "Importación de certificados sin iniciar",
 }
 IMPORTABLE_DOCUMENT_EXTENSIONS = {".pdf", ".doc", ".docx", ".txt"}
+# Increment when certificate detection or extraction changes.
+CERTIFICATE_PARSER_VERSION = 1
 
 
 def _save_extracted_record(relative: str, fields: dict[str, str], is_certificate: bool) -> dict:
@@ -131,43 +132,28 @@ def _collect_importable_user_documents() -> tuple[list[Path], list[str]]:
     def on_walk_error(error: OSError) -> None:
         errors.append(str(error))
 
-    for current, directories, filenames in os.walk(DOCUMENT_ROOT, onerror=on_walk_error):
-        directories[:] = [
-            name for name in directories
-            if not name.startswith(".") and not (Path(current) / name).is_symlink()
-            and os.path.normcase(os.path.abspath(Path(current) / name))
-            != os.path.normcase(str(APP_DATA))
-        ]
-        for filename in filenames:
-            path = Path(current) / filename
-            if (
-                path.suffix.lower() not in IMPORTABLE_DOCUMENT_EXTENSIONS
-                or path.is_symlink()
-            ):
-                continue
-            try:
-                relative_parts = path.relative_to(DOCUMENT_ROOT).parts
-            except ValueError:
-                continue
-            if len(relative_parts) >= 2:
-                files.append(path)
+    for entry in iter_tree_files(DOCUMENT_ROOT, on_walk_error, APP_DATA):
+        path = Path(entry.path)
+        if path.suffix.lower() not in IMPORTABLE_DOCUMENT_EXTENSIONS:
+            continue
+        try:
+            relative_parts = path.relative_to(DOCUMENT_ROOT).parts
+        except ValueError:
+            continue
+        if len(relative_parts) >= 2:
+            files.append(path)
     files.sort(key=lambda path: path.as_posix().casefold())
     return files, errors
 
 
 def _certificate_import_worker() -> None:
-    try:
-        while True:
-            with INDEX_STATE_LOCK:
-                index_running = INDEX_STATE["running"]
-            if not index_running:
-                break
-            with CERTIFICATE_IMPORT_STATE_LOCK:
-                CERTIFICATE_IMPORT_STATE["message"] = (
-                    "Esperando a que termine la indexación para evitar bloqueos de SQLite"
-                )
-            time.sleep(2)
+    # Una sola instancia de Word para todos los .doc de la revisión.
+    with word_session():
+        _run_certificate_import()
 
+
+def _run_certificate_import() -> None:
+    try:
         files, walk_errors = _collect_importable_user_documents()
         with CERTIFICATE_IMPORT_STATE_LOCK:
             CERTIFICATE_IMPORT_STATE.update({
@@ -175,63 +161,131 @@ def _certificate_import_worker() -> None:
                 "processed": 0,
                 "imported": 0,
                 "updated": 0,
+                "unchanged": 0,
                 "without_text": 0,
                 "errors": len(walk_errors),
                 "error_details": walk_errors[:20],
                 "message": "Revisando archivos en búsqueda de autorizaciones individuales",
             })
 
-        for path in files:
-            relative = path.relative_to(DOCUMENT_ROOT).as_posix()
-            try:
-                safe_path, relative = safe_relative_path(relative)
-                extension = safe_path.suffix.lower()
-                if extension == ".pdf":
-                    text = extract_pdf_text(safe_path)
-                elif extension == ".doc":
-                    text = extract_legacy_doc_text(safe_path)
-                elif extension == ".docx":
-                    text = parse_docx(safe_path)
-                else:
-                    text = safe_path.read_text(encoding="utf-8-sig")
-                if not text.strip():
-                    with CERTIFICATE_IMPORT_STATE_LOCK:
-                        CERTIFICATE_IMPORT_STATE["without_text"] += 1
-                    continue
-
-                is_certificate = (
-                    is_authorization_certificate(safe_path)
-                    or is_authorization_individual(text)
+        cache = connect_db()
+        root = str(DOCUMENT_ROOT)
+        try:
+            # Se cargan una vez en memoria para no hacer una consulta por archivo.
+            cached_outcomes = {
+                row["path"]: (row["size"], row["modified_ns"], row["parser_version"], row["outcome"])
+                for row in cache.execute(
+                    "SELECT path, size, modified_ns, parser_version, outcome "
+                    "FROM certificate_import_cache WHERE root = ?",
+                    (root,),
                 )
-                if not is_certificate:
-                    continue
-                fields = (
-                    extract_authorization_certificate(safe_path)
-                    if extension == ".pdf"
-                    else extract_certificate_fields(text, [])
+            }
+            certificate_paths = {
+                row["source_path"]
+                for row in cache.execute(
+                    "SELECT source_path FROM extracted_records "
+                    "WHERE is_authorization_certificate = 1"
                 )
-                if not any(fields.values()):
-                    raise ValueError("No se pudieron extraer datos de la autorización individual.")
-                result = _save_extracted_record(relative, fields, True)
-                with CERTIFICATE_IMPORT_STATE_LOCK:
-                    if result["updated"]:
-                        CERTIFICATE_IMPORT_STATE["updated"] += 1
-                    elif result["already_extracted"]:
-                        CERTIFICATE_IMPORT_STATE["updated"] += 1
-                    else:
-                        CERTIFICATE_IMPORT_STATE["imported"] += 1
-            except Exception as exc:
-                with CERTIFICATE_IMPORT_STATE_LOCK:
-                    CERTIFICATE_IMPORT_STATE["errors"] += 1
-                    if len(CERTIFICATE_IMPORT_STATE["error_details"]) < 20:
-                        CERTIFICATE_IMPORT_STATE["error_details"].append(f"{relative}: {exc}")
-            finally:
-                with CERTIFICATE_IMPORT_STATE_LOCK:
-                    CERTIFICATE_IMPORT_STATE["processed"] += 1
-                    CERTIFICATE_IMPORT_STATE["message"] = (
-                        f"Revisados {CERTIFICATE_IMPORT_STATE['processed']} "
-                        f"de {CERTIFICATE_IMPORT_STATE['total']} archivos"
+            }
+            if not walk_errors:
+                present = {path.relative_to(DOCUMENT_ROOT).as_posix() for path in files}
+                obsolete = [
+                    (root, path) for path in cached_outcomes if path not in present
+                ]
+                if obsolete:
+                    cache.executemany(
+                        "DELETE FROM certificate_import_cache WHERE root = ? AND path = ?",
+                        obsolete,
                     )
+                    cache.commit()
+
+            for path in files:
+                relative = path.relative_to(DOCUMENT_ROOT).as_posix()
+                try:
+                    stat = path.stat()
+                    cached = cached_outcomes.get(relative)
+                    if cached and cached[:3] == (
+                        stat.st_size, stat.st_mtime_ns, CERTIFICATE_PARSER_VERSION,
+                    ) and (cached[3] != "certificate" or relative in certificate_paths):
+                        with CERTIFICATE_IMPORT_STATE_LOCK:
+                            CERTIFICATE_IMPORT_STATE["unchanged"] += 1
+                            if cached[3] == "without_text":
+                                CERTIFICATE_IMPORT_STATE["without_text"] += 1
+                        continue
+
+                    safe_path, relative = safe_relative_path(relative)
+                    stat = safe_path.stat()
+                    extension = safe_path.suffix.lower()
+                    pdf_fields = None
+                    if extension == ".pdf":
+                        text, pdf_fields = read_pdf_authorization(
+                            safe_path,
+                            lambda value: (
+                                is_authorization_certificate(safe_path)
+                                or is_authorization_individual(value)
+                            ),
+                        )
+                    elif extension == ".doc":
+                        text = extract_legacy_doc_text(safe_path)
+                    elif extension == ".docx":
+                        text = parse_docx(safe_path)
+                    else:
+                        text = safe_path.read_text(encoding="utf-8-sig")
+
+                    outcome = "other"
+                    fields = None
+                    if not text.strip():
+                        outcome = "without_text"
+                    else:
+                        if extension == ".pdf":
+                            fields = pdf_fields
+                        elif is_authorization_certificate(safe_path) or is_authorization_individual(text):
+                            fields = extract_certificate_fields(text, [])
+                    if fields is not None:
+                        if not any(fields.values()):
+                            raise ValueError("No se pudieron extraer datos de la autorización individual.")
+                        outcome = "certificate"
+
+                    current = safe_path.stat()
+                    if (current.st_size, current.st_mtime_ns) != (stat.st_size, stat.st_mtime_ns):
+                        raise ValueError("El archivo cambió durante la revisión; vuelve a intentarlo.")
+
+                    if fields is not None:
+                        result = _save_extracted_record(relative, fields, True)
+                        with CERTIFICATE_IMPORT_STATE_LOCK:
+                            if result["updated"] or result["already_extracted"]:
+                                CERTIFICATE_IMPORT_STATE["updated"] += 1
+                            else:
+                                CERTIFICATE_IMPORT_STATE["imported"] += 1
+                    elif outcome == "without_text":
+                        with CERTIFICATE_IMPORT_STATE_LOCK:
+                            CERTIFICATE_IMPORT_STATE["without_text"] += 1
+
+                    cache.execute(
+                        "INSERT INTO certificate_import_cache "
+                        "(root, path, size, modified_ns, parser_version, outcome) "
+                        "VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(root, path) DO UPDATE SET "
+                        "size = excluded.size, modified_ns = excluded.modified_ns, "
+                        "parser_version = excluded.parser_version, outcome = excluded.outcome",
+                        (root, relative, stat.st_size, stat.st_mtime_ns,
+                         CERTIFICATE_PARSER_VERSION, outcome),
+                    )
+                    cache.commit()
+                except Exception as exc:
+                    cache.rollback()
+                    with CERTIFICATE_IMPORT_STATE_LOCK:
+                        CERTIFICATE_IMPORT_STATE["errors"] += 1
+                        if len(CERTIFICATE_IMPORT_STATE["error_details"]) < 20:
+                            CERTIFICATE_IMPORT_STATE["error_details"].append(f"{relative}: {exc}")
+                finally:
+                    with CERTIFICATE_IMPORT_STATE_LOCK:
+                        CERTIFICATE_IMPORT_STATE["processed"] += 1
+                        CERTIFICATE_IMPORT_STATE["message"] = (
+                            f"Revisados {CERTIFICATE_IMPORT_STATE['processed']} "
+                            f"de {CERTIFICATE_IMPORT_STATE['total']} archivos"
+                        )
+        finally:
+            cache.close()
         with CERTIFICATE_IMPORT_STATE_LOCK:
             CERTIFICATE_IMPORT_STATE["message"] = "Revisión de archivos finalizada"
     except Exception as exc:
@@ -250,58 +304,40 @@ class RecordRoutes:
     def extract_record(self, data: dict) -> None:
         path, relative = safe_relative_path(str(data.get("path", "")))
         extension = path.suffix.lower()
-        is_certificate = False
+        pdf_fields = None
         if extension == ".pdf":
-            text = extract_pdf_text(path)
-            if not text.strip():
-                return self.send_error_json(
-                    "Este archivo no contiene texto utilizable. Si es un escaneo, se necesitaría OCR.",
-                    422,
-                )
-            is_certificate = (
-                is_authorization_certificate(path) or is_authorization_individual(text)
+            text, pdf_fields = read_pdf_authorization(
+                path,
+                lambda value: is_authorization_certificate(path) or is_authorization_individual(value),
             )
-            if is_certificate:
-                fields = extract_authorization_certificate(path)
-                if not any(fields.values()):
-                    return self.send_error_json(
-                        "No se pudo extraer texto utilizable de la autorización individual.",
-                        422,
-                    )
-            else:
-                fields = extract_candidate_fields(text)
         elif extension == ".docx":
             text = parse_docx(path)
-            is_certificate = is_authorization_individual(text)
-            fields = (
-                extract_certificate_fields(text, [])
-                if is_certificate
-                else extract_candidate_fields(text)
-            )
         elif extension == ".doc":
             text = extract_legacy_doc_text(path)
-            is_certificate = is_authorization_individual(text)
-            fields = (
-                extract_certificate_fields(text, [])
-                if is_certificate
-                else extract_candidate_fields(text)
-            )
         elif extension == ".txt":
             text = path.read_text(encoding="utf-8-sig")
-            is_certificate = is_authorization_individual(text)
-            fields = (
-                extract_certificate_fields(text, [])
-                if is_certificate
-                else extract_candidate_fields(text)
-            )
         else:
             raise ValueError("La importación de datos está disponible para PDF, DOC, DOCX y TXT.")
-        if extension != ".pdf" and not text.strip():
+        if not text.strip():
             return self.send_error_json(
                 "Este archivo no contiene texto utilizable. Si es un PDF escaneado, se necesitaría OCR.",
                 422,
             )
-        result = _save_extracted_record(relative, fields, is_certificate)
+        if extension == ".pdf":
+            fields = pdf_fields
+        elif is_authorization_individual(text):
+            fields = extract_certificate_fields(text, [])
+        else:
+            fields = None
+        if fields is None:
+            return self.send_error_json(
+                "No se reconoció una autorización individual en este documento.", 422
+            )
+        if not any(fields.values()):
+            return self.send_error_json(
+                "No se pudieron extraer datos de la autorización individual.", 422
+            )
+        result = _save_extracted_record(relative, fields, True)
         self.send_json(result, 201)
 
     def start_certificate_import(self) -> None:
@@ -315,6 +351,7 @@ class RecordRoutes:
                 "processed": 0,
                 "imported": 0,
                 "updated": 0,
+                "unchanged": 0,
                 "without_text": 0,
                 "errors": 0,
                 "error_details": [],
@@ -355,64 +392,6 @@ class RecordRoutes:
         ))
         self.send_json({"items": items})
 
-    def update_record(self, data: dict) -> None:
-        try:
-            record_id = int(data.get("id"))
-        except (TypeError, ValueError):
-            raise ValueError("El registro indicado no es válido.") from None
-        allowed = {
-            "first_name", "last_name", "identity_number",
-            "authorization_number", "practice", "issue_date", "expiry_date", "equipment",
-        }
-        updates = data.get("fields")
-        if not isinstance(updates, dict) or not updates or not set(updates).issubset(allowed):
-            raise ValueError("No hay campos válidos para guardar.")
-        for value in updates.values():
-            if not isinstance(value, str) or len(value) > 10000:
-                raise ValueError("Cada campo admite texto de hasta 10000 caracteres.")
-
-        assignments = ", ".join(f"{key} = ?" for key in updates)
-        values = list(updates.values())
-        connection = connect_db()
-        try:
-            current = connection.execute(
-                "SELECT source_path, first_name, last_name, identity_number, authorization_number, "
-                "practice, issue_date, expiry_date, equipment, is_authorization_certificate "
-                "FROM extracted_records WHERE id = ?",
-                (record_id,),
-            ).fetchone()
-            if not current:
-                raise FileNotFoundError
-            merged = dict(current)
-            merged.update(updates)
-            if current["is_authorization_certificate"] or is_authorization_certificate(
-                Path(merged["source_path"])
-            ):
-                review_fields = [
-                    "identity_number", "authorization_number", "practice",
-                    "issue_date", "expiry_date", "equipment",
-                ]
-            else:
-                review_fields = [
-                    "first_name", "last_name", "identity_number",
-                    "authorization_number", "equipment",
-                ]
-            needs_review = int(any(not merged[field].strip() for field in review_fields))
-            cursor = connection.execute(
-                f"UPDATE extracted_records SET {assignments}, needs_review = ? WHERE id = ?",
-                (*values, needs_review, record_id),
-            )
-            if cursor.rowcount == 0:
-                raise FileNotFoundError
-            row = connection.execute(
-                "SELECT * FROM extracted_records WHERE id = ?",
-                (record_id,),
-            ).fetchone()
-            connection.commit()
-        finally:
-            connection.close()
-        self.send_json({"record": dict(row)})
-
     def export_records(self) -> None:
         connection = connect_db()
         try:
@@ -443,6 +422,11 @@ class RecordRoutes:
         )
         for row in ordered_rows:
             sheet.append([user_folder_from_path(row["source_path"]), *list(row)])
+            # El texto viene de documentos externos: se guarda siempre como texto
+            # para que un valor que empiece con "=" no se ejecute como fórmula en Excel.
+            for cell in sheet[sheet.max_row]:
+                if isinstance(cell.value, str):
+                    cell.data_type = "s"
         for cell in sheet[1]:
             cell.font = Font(bold=True, color="FFFFFF")
             cell.fill = PatternFill("solid", fgColor="1D4ED8")

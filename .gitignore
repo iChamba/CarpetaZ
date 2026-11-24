@@ -2,3 +2,19 @@
 appdata/
 __pycache__/
 tests/__pycache__/
+
+# Bases de datos, respaldos y registros (contienen datos personales)
+*.sqlite3
+*.sqlite3-*
+*.db
+*.log
+
+# Configuración local y secretos
+.env
+.env.*
+
+# Archivos generados por Python y Windows
+*.pyc
+Thumbs.db
+desktop.ini
+~$*

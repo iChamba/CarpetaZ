@@ -1,4 +1,14 @@
-import { appendYearGroups, element, formatSize, makeButton, requestJson, setMessage } from "./common.js";
+import {
+  element,
+  formatSize,
+  initDirectoryToggle,
+  makeButton,
+  requestJson,
+  resetPreviewActions,
+  setMessage,
+  setPreviewCloseAction,
+  setPdfPreviewActions,
+} from "./common.js";
 import { authorizationStatus, compareAuthorizationRecency } from "./users.js";
 
 const ENTITY_PAGE_SIZE = 100;
@@ -7,9 +17,12 @@ let selectedEntity = "";
 let loadedEntities = [];
 let entitiesOffset = 0;
 let entitiesTotal = 0;
+let entitiesLoadGeneration = 0;
+let entityProfileRequest = 0;
 let completionHandled = true;
 
 export function initEntities() {
+  initDirectoryToggle("entity", "instituciones");
   document.getElementById("entity-filter").addEventListener("submit", event => {
     event.preventDefault();
     entitiesOffset = 0;
@@ -26,6 +39,18 @@ export function initEntities() {
       loadEntities(0);
     });
   }
+  const licenseFilter = document.getElementById("entity-license-filter");
+  const licenseStatusFilter = document.getElementById("entity-license-status-filter");
+  licenseFilter.addEventListener("change", () => {
+    licenseStatusFilter.disabled = licenseFilter.value === "without";
+    if (licenseStatusFilter.disabled) licenseStatusFilter.value = "";
+    entitiesOffset = 0;
+    loadEntities(0);
+  });
+  licenseStatusFilter.addEventListener("change", () => {
+    entitiesOffset = 0;
+    loadEntities(0);
+  });
   document.getElementById("entity-prev").addEventListener("click", () => {
     entitiesOffset = Math.max(0, entitiesOffset - ENTITY_PAGE_SIZE);
     loadEntities(entitiesOffset);
@@ -44,6 +69,7 @@ export function initEntities() {
 }
 
 export async function loadEntities(offset = entitiesOffset) {
+  const generation = ++entitiesLoadGeneration;
   const query = document.getElementById("entity-query").value.trim();
   setMessage("entity-message", "Cargando instituciones…");
   try {
@@ -52,10 +78,13 @@ export async function loadEntities(offset = entitiesOffset) {
       practice: document.getElementById("entity-practice-filter").value,
       department: document.getElementById("entity-department-filter").value,
       locality: document.getElementById("entity-locality-filter").value,
+      license: document.getElementById("entity-license-filter").value,
+      status: document.getElementById("entity-license-status-filter").value,
       offset: String(offset),
       limit: String(ENTITY_PAGE_SIZE),
     });
     const data = await requestJson(`/api/entities?${params}`);
+    if (generation !== entitiesLoadGeneration) return false;
     loadedEntities = data.items;
     entitiesOffset = data.offset;
     entitiesTotal = data.total;
@@ -65,8 +94,10 @@ export async function loadEntities(offset = entitiesOffset) {
     renderEntityList();
     if (selectedEntity && data.items.some(entity => entity.name === selectedEntity)) {
       await loadEntity(selectedEntity);
+      if (generation !== entitiesLoadGeneration) return false;
     } else {
       if (selectedEntity) {
+        entityProfileRequest += 1;
         selectedEntity = "";
         const profile = document.getElementById("entity-profile");
         profile.className = "user-profile empty-state";
@@ -82,12 +113,15 @@ export async function loadEntities(offset = entitiesOffset) {
         "entity-message",
         `${data.catalog.message}: ${data.catalog.processed} archivo(s) catalogados`,
       );
-      window.setTimeout(() => loadEntities(offset), 1200);
+      window.setTimeout(() => {
+        if (generation === entitiesLoadGeneration) loadEntities(offset);
+      }, 1200);
     } else if (!data.catalog.ready) {
       setMessage("entity-message", data.catalog.message, "error");
     }
     return true;
   } catch (error) {
+    if (generation !== entitiesLoadGeneration) return false;
     setMessage("entity-message", error.message, "error");
     return false;
   }
@@ -98,7 +132,7 @@ async function refreshEntityCatalog() {
   button.disabled = true;
   setMessage("entity-message", "Iniciando actualización del catálogo…");
   try {
-    await requestJson("/api/index", { method: "POST" });
+    await requestJson("/api/catalog/refresh", { method: "POST" });
     await waitForEntityCatalog();
   } catch (error) {
     button.disabled = false;
@@ -119,6 +153,7 @@ async function waitForEntityCatalog() {
       return;
     }
     button.disabled = false;
+    window.dispatchEvent(new Event("records-stale"));
     await loadEntities(0);
   } catch (error) {
     button.disabled = false;
@@ -141,10 +176,14 @@ function renderEntityList() {
   const practice = document.getElementById("entity-practice-filter").value;
   const department = document.getElementById("entity-department-filter").value;
   const locality = document.getElementById("entity-locality-filter").value;
+  const license = document.getElementById("entity-license-filter").value;
+  const status = document.getElementById("entity-license-status-filter").value;
   const entities = loadedEntities.filter(entity =>
     (!practice || entity.practices.includes(practice))
     && (!department || entity.departments.includes(department))
     && (!locality || entity.localities.includes(locality))
+    && (!license || entity.has_license === (license === "with"))
+    && (!status || entity.license_statuses.includes(status))
   );
   list.replaceChildren();
   for (const entity of entities) {
@@ -179,12 +218,38 @@ function renderEntityList() {
     entitiesOffset + loadedEntities.length >= entitiesTotal;
 }
 
+export async function openLinkedEntity(name) {
+  const requestId = ++entityProfileRequest;
+  selectedEntity = "";
+  document.getElementById("entity-query").value = name;
+  for (const id of ["entity-practice-filter", "entity-department-filter", "entity-locality-filter",
+    "entity-license-filter", "entity-license-status-filter"]) {
+    document.getElementById(id).value = "";
+  }
+  document.getElementById("entity-license-status-filter").disabled = false;
+  const profile = document.getElementById("entity-profile");
+  profile.className = "user-profile empty-state";
+  profile.textContent = `Abriendo ficha de ${name}…`;
+  const loaded = await loadEntities(0);
+  if (requestId !== entityProfileRequest) return false;
+  if (!loaded) {
+    profile.textContent = "No se pudo abrir la ficha de la entidad.";
+    return false;
+  }
+  return loadEntity(name);
+}
+
 async function loadEntity(name) {
+  const requestId = ++entityProfileRequest;
   selectedEntity = name;
   renderEntityList();
+  const profile = document.getElementById("entity-profile");
+  profile.className = "user-profile empty-state";
+  profile.textContent = `Abriendo ficha de ${name}…`;
   setMessage("entity-message", `Abriendo documentos de ${name}…`);
   try {
     const data = await requestJson(`/api/entity?name=${encodeURIComponent(name)}`);
+    if (requestId !== entityProfileRequest) return false;
     renderEntityProfile(data);
     const warning = data.warnings
       ? ` Se omitieron ${data.warnings} ubicaciones inaccesibles.`
@@ -192,6 +257,8 @@ async function loadEntity(name) {
     setMessage("entity-message", `${data.entity.document_count} documento(s) en ${name}.${warning}`);
     return true;
   } catch (error) {
+    if (requestId !== entityProfileRequest) return false;
+    profile.textContent = "No se pudo abrir la ficha de la entidad.";
     setMessage("entity-message", error.message, "error");
     return false;
   }
@@ -201,8 +268,13 @@ function renderLicenseCard(card) {
   const status = authorizationStatus(card.expiry_date);
   const article = element("article", undefined, `authorization-card ${status.cardClass}`);
   const heading = element("div", undefined, "authorization-card-heading");
+  const title = element("div", undefined, "authorization-card-title");
+  title.append(element("h5", card.license_number));
+  const sourceButton = makeButton("Ver documento", "preview", "button secondary small");
+  sourceButton.dataset.path = card.source_path;
+  title.append(sourceButton);
   heading.append(
-    element("h5", card.license_number),
+    title,
     element("span", status.label, `authorization-status ${status.className}`),
   );
   article.append(heading);
@@ -218,6 +290,55 @@ function renderLicenseCard(card) {
     fields.append(box);
   });
   article.append(fields);
+  const technicalTables = card.technical_tables || [];
+  const pendingTables = card.technical_tables_pending || !card.technical_tables;
+  const technicalDetails = element("details", undefined, "authorization-equipment-details");
+  technicalDetails.append(element(
+    "summary",
+    `Equipos y sistemas (${technicalTables.length} tablas${pendingTables ? " · pendiente de procesar" : ""})`,
+  ));
+  if (pendingTables) {
+    technicalDetails.append(element(
+      "p",
+      "Hay documentos pendientes de revisar para extraer sus tablas.",
+      "empty-list",
+    ));
+  }
+  if (!technicalTables.length && !pendingTables) {
+    technicalDetails.append(element(
+      "p",
+      "No se identificaron tablas de equipos o sistemas. Consultá los documentos originales.",
+      "empty-list",
+    ));
+  }
+  for (const data of technicalTables) {
+    const section = element("section", undefined, "license-technical-table");
+    const firstRowValues = (data.rows[0] || []).filter(cell => cell.trim());
+    const firstRowTitle = firstRowValues.length === 1 && /^equipos?\s+generadores?\s+de\s*(?:r\s*\.?\s*i\.?|radiaci[oó]n(?:es)?\s+ionizantes?)\s*[:.]?$/i.test(firstRowValues[0])
+      ? firstRowValues[0]
+      : "";
+    section.append(element("h6", `${firstRowTitle || data.title} · ${data.source_name}`));
+    if (data.heading && data.heading.trim().toLocaleLowerCase("es") !== firstRowTitle.toLocaleLowerCase("es")) {
+      section.append(element("p", data.heading));
+    }
+    const rows = data.rows.slice(firstRowTitle ? 1 : 0);
+    const columnCount = rows.reduce((max, row) => Math.max(max, row.length), 0);
+    const visibleColumns = Array.from({ length: columnCount }, (_, index) => index)
+      .filter(index => rows.some(row => (row[index] || "").trim()));
+    const wrap = element("div", undefined, "table-wrap");
+    const table = document.createElement("table");
+    const body = document.createElement("tbody");
+    for (const cells of rows) {
+      const row = document.createElement("tr");
+      for (const index of visibleColumns) row.append(element("td", cells[index] || ""));
+      body.append(row);
+    }
+    table.append(body);
+    wrap.append(table);
+    section.append(wrap);
+    technicalDetails.append(section);
+  }
+  article.append(technicalDetails);
   const list = element("ul", undefined, "authorization-equipment");
   for (const source of card.documents) {
     const item = element("li");
@@ -305,6 +426,26 @@ function renderEntityProfile(data) {
         `${area.document_count} documentos · ${area.imported_count} con licencia reconocida`,
         "entity-file-status",
       ));
+      if (area.technical_opinions.length) {
+        const opinions = element("details", undefined, "entity-technical-opinions");
+        opinions.append(element(
+          "summary",
+          `Dictámenes técnicos (DT) (${area.technical_opinions.length})`,
+        ));
+        const list = element("ul", undefined, "authorization-equipment");
+        for (const opinion of area.technical_opinions) {
+          const item = element("li");
+          item.append(element("span", opinion.name));
+          if (opinion.can_preview) {
+            const preview = makeButton("Ver", "preview");
+            preview.dataset.path = opinion.path;
+            item.append(" ", preview);
+          }
+          list.append(item);
+        }
+        opinions.append(list);
+        areaSection.append(opinions);
+      }
       const loadFiles = makeButton(
         `Cargar documentos (${area.document_count})`,
         "load-area-files",
@@ -328,34 +469,57 @@ function formatAreaLocation(area) {
   return locations.join(" · ");
 }
 
-function renderEntityDocuments(files, areaPath, offset, limit, total) {
-  const wrap = element("div", undefined, "table-wrap user-files-wrap");
+function renderEntityFolderGroups(folders, areaPath) {
+  const groups = element("div", undefined, "entity-folder-groups");
+  for (const folder of folders) {
+    const section = element("section", undefined, "entity-folder-group");
+    const label = folder.is_root ? "Carpeta principal" : folder.name;
+    const toggle = makeButton(
+      `${label} (${folder.document_count})`,
+      "toggle-entity-folder",
+      "entity-folder-toggle",
+    );
+    toggle.dataset.path = areaPath;
+    toggle.dataset.folder = folder.name;
+    toggle.dataset.root = String(folder.is_root);
+    toggle.setAttribute("aria-expanded", "false");
+    const content = element("div", undefined, "entity-folder-content hidden");
+    section.append(toggle, content);
+    groups.append(section);
+  }
+  if (!folders.length) {
+    groups.append(element("p", "No se encontraron documentos en esta institución.", "empty-list"));
+  }
+  return groups;
+}
+
+function renderEntityDocuments(files, areaPath, folder, isRoot, offset, limit, total) {
+  const wrap = element("div", undefined, "table-wrap user-files-wrap entity-documents-wrap");
   const table = document.createElement("table");
   const head = document.createElement("thead");
   const header = document.createElement("tr");
-  ["Documento", "Tipo", "Tamaño", "Creado", "Licencia", "Acciones"].forEach(label => {
+  ["Documento", "Tipo", "Tamaño", "Creado", "Acciones"].forEach(label => {
     header.append(element("th", label));
   });
   head.append(header);
   table.append(head);
 
   const body = document.createElement("tbody");
-  appendYearGroups(body, files, 6, file => {
+  for (const file of files) {
     const row = document.createElement("tr");
     const areaPrefix = `${areaPath}/`;
     const displayPath = file.path.startsWith(areaPrefix)
       ? file.path.slice(areaPrefix.length)
       : file.path;
-    const pathCell = element("td", displayPath, "user-file-path");
+    const pathCell = element("td", undefined, "user-file-path");
+    const filenameIndex = Math.max(displayPath.lastIndexOf("/"), displayPath.lastIndexOf("\\")) + 1;
+    pathCell.append(document.createTextNode(displayPath.slice(0, filenameIndex)));
+    pathCell.append(element("strong", displayPath.slice(filenameIndex)));
     pathCell.title = file.path;
     row.append(pathCell);
     row.append(element("td", file.extension));
     row.append(element("td", formatSize(file.size)));
     row.append(element("td", (file.created || "").slice(0, 10)));
-    row.append(element(
-      "td",
-      file.license_number || (file.can_import ? "Pendiente" : "No automática"),
-    ));
     const actions = element("td", undefined, "actions");
     if (file.can_preview) {
       const preview = makeButton("Ver", "preview");
@@ -365,11 +529,6 @@ function renderEntityDocuments(files, areaPath, offset, limit, total) {
     const reveal = makeButton("Carpeta", "reveal");
     reveal.dataset.path = file.path;
     actions.append(reveal);
-    const download = document.createElement("a");
-    download.className = "button secondary small";
-    download.href = `/api/entity/download?path=${encodeURIComponent(file.path)}`;
-    download.textContent = "Descargar";
-    actions.append(download);
     if (file.can_import) {
       const extract = makeButton(
         file.license_number ? "Actualizar licencia" : "Extraer licencia",
@@ -379,11 +538,11 @@ function renderEntityDocuments(files, areaPath, offset, limit, total) {
       actions.append(extract);
     }
     row.append(actions);
-    return row;
-  });
+    body.append(row);
+  }
   if (!total) {
     const row = document.createElement("tr");
-    row.append(element("td", "No se encontraron documentos en esta institución.", undefined));
+    row.append(element("td", "No se encontraron documentos en esta carpeta.", undefined));
     body.append(row);
   }
   table.append(body);
@@ -395,10 +554,14 @@ function renderEntityDocuments(files, areaPath, offset, limit, total) {
   const controls = document.createElement("div");
   const previous = makeButton("Anterior", "entity-files-page", "button secondary small");
   previous.dataset.path = areaPath;
+  previous.dataset.folder = folder;
+  previous.dataset.root = String(isRoot);
   previous.dataset.offset = String(Math.max(0, offset - limit));
   previous.disabled = offset <= 0;
   const next = makeButton("Siguiente", "entity-files-page", "button secondary small");
   next.dataset.path = areaPath;
+  next.dataset.folder = folder;
+  next.dataset.root = String(isRoot);
   next.dataset.offset = String(offset + limit);
   next.disabled = offset + files.length >= total;
   controls.append(previous, next);
@@ -407,19 +570,44 @@ function renderEntityDocuments(files, areaPath, offset, limit, total) {
   return wrap;
 }
 
-async function loadEntityAreaFiles(areaPath, offset, container) {
+async function loadEntityAreaFiles(areaPath, container) {
+  const params = new URLSearchParams({
+    name: selectedEntity,
+    area: areaPath,
+    folders_only: "1",
+  });
+  container.textContent = "Cargando subcarpetas…";
+  try {
+    const data = await requestJson(`/api/entity?${params}`);
+    container.replaceChildren(renderEntityFolderGroups(data.folders, areaPath));
+    return true;
+  } catch (error) {
+    container.textContent = "";
+    setMessage("entity-message", error.message, "error");
+    return false;
+  }
+}
+
+async function loadEntityFolderFiles(areaPath, folder, isRoot, offset, container) {
   const params = new URLSearchParams({
     name: selectedEntity,
     area: areaPath,
     offset: String(offset),
     limit: String(ENTITY_FILE_PAGE_SIZE),
   });
+  if (isRoot) {
+    params.set("root", "1");
+  } else {
+    params.set("folder", folder);
+  }
   container.textContent = "Cargando documentos…";
   try {
     const data = await requestJson(`/api/entity?${params}`);
     container.replaceChildren(renderEntityDocuments(
       data.files,
       areaPath,
+      folder,
+      isRoot,
       data.offset,
       data.limit,
       data.total,
@@ -436,10 +624,6 @@ function renderEntityPreviewPanel() {
   const panel = element("aside", undefined, "preview-panel user-preview-panel");
   const heading = element("div", undefined, "preview-title");
   heading.append(element("h3", "Vista previa", undefined));
-  const download = element("a", "Descargar", "button secondary hidden");
-  download.id = "entity-preview-download";
-  download.href = "#";
-  heading.append(download);
   panel.append(heading);
   panel.append(element(
     "div",
@@ -453,10 +637,8 @@ function renderEntityPreviewPanel() {
 async function previewEntityFile(path) {
   const content = document.getElementById("entity-preview-content");
   const title = document.querySelector("#entity-profile .preview-title h3");
-  const download = document.getElementById("entity-preview-download");
+  resetPreviewActions(title);
   title.textContent = path;
-  download.href = `/api/entity/download?path=${encodeURIComponent(path)}`;
-  download.classList.remove("hidden");
   content.className = "preview-content";
   content.replaceChildren();
   const extension = path.split(".").pop().toLowerCase();
@@ -466,23 +648,38 @@ async function previewEntityFile(path) {
     frame.title = `Vista previa de ${path}`;
     frame.src = url;
     content.append(frame);
-  } else if (["jpg", "jpeg", "png"].includes(extension)) {
-    const image = document.createElement("img");
-    image.alt = path;
-    image.src = url;
-    content.append(image);
-  } else if (["txt", "doc", "docx"].includes(extension)) {
-    try {
-      const response = await fetch(url);
-      if (!response.ok) {
-        const data = await response.json();
-        throw new Error(data.error || `Error HTTP ${response.status}`);
+    setPdfPreviewActions(title, frame, closeEntityPreview);
+  } else {
+    setPreviewCloseAction(title, closeEntityPreview);
+    if (["jpg", "jpeg", "png"].includes(extension)) {
+      const image = document.createElement("img");
+      image.alt = path;
+      image.src = url;
+      content.append(image);
+    } else if (["txt", "doc", "docx"].includes(extension)) {
+      try {
+        const response = await fetch(url);
+        if (!response.ok) {
+          const data = await response.json();
+          throw new Error(data.error || `Error HTTP ${response.status}`);
+        }
+        content.append(element("pre", await response.text()));
+      } catch (error) {
+        setMessage("entity-message", error.message, "error");
       }
-      content.append(element("pre", await response.text()));
-    } catch (error) {
-      setMessage("entity-message", error.message, "error");
     }
   }
+}
+
+function closeEntityPreview() {
+  const content = document.getElementById("entity-preview-content");
+  const title = document.querySelector("#entity-profile .preview-title h3");
+  content.className = "preview-content empty-state";
+  content.textContent = "Selecciona un documento para previsualizarlo aquí.";
+  title.textContent = "Vista previa";
+  resetPreviewActions(title);
+  const browser = document.querySelector("#entity-profile .preview-browser-layout");
+  if (browser) browser.classList.add("preview-hidden");
 }
 
 async function handleEntityAction(event) {
@@ -491,17 +688,49 @@ async function handleEntityAction(event) {
   if (button.dataset.action === "load-area-files") {
     button.disabled = true;
     const container = button.nextElementSibling;
-    if (await loadEntityAreaFiles(button.dataset.path, 0, container)) {
+    if (await loadEntityAreaFiles(button.dataset.path, container)) {
       button.remove();
     } else {
       button.disabled = false;
     }
-  } else if (button.dataset.action === "entity-files-page") {
-    await loadEntityAreaFiles(
+  } else if (button.dataset.action === "toggle-entity-folder") {
+    const content = button.nextElementSibling;
+    const expanded = button.getAttribute("aria-expanded") === "true";
+    if (expanded) {
+      button.setAttribute("aria-expanded", "false");
+      content.classList.add("hidden");
+      return;
+    }
+
+    button.setAttribute("aria-expanded", "true");
+    content.classList.remove("hidden");
+    if (content.dataset.loaded === "true") return;
+
+    button.disabled = true;
+    const loaded = await loadEntityFolderFiles(
       button.dataset.path,
-      Number(button.dataset.offset),
-      button.closest(".entity-area-files"),
+      button.dataset.folder,
+      button.dataset.root === "true",
+      0,
+      content,
     );
+    button.disabled = false;
+    if (loaded) {
+      content.dataset.loaded = "true";
+    } else {
+      button.setAttribute("aria-expanded", "false");
+      content.classList.add("hidden");
+    }
+  } else if (button.dataset.action === "entity-files-page") {
+    button.disabled = true;
+    await loadEntityFolderFiles(
+      button.dataset.path,
+      button.dataset.folder,
+      button.dataset.root === "true",
+      Number(button.dataset.offset),
+      button.closest(".entity-folder-content"),
+    );
+    button.disabled = false;
   } else if (button.dataset.action === "toggle-previous-licenses") {
     const previous = button.nextElementSibling;
     const expanded = button.getAttribute("aria-expanded") === "true";
@@ -525,6 +754,7 @@ async function handleEntityAction(event) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ path: button.dataset.path }),
       });
+      window.dispatchEvent(new Event("records-stale"));
       await loadEntities();
       setMessage(
         "entity-message",
@@ -583,6 +813,7 @@ async function refreshEntityImportStatus() {
     button.disabled = false;
     if (status.has_run && !completionHandled) {
       completionHandled = true;
+      window.dispatchEvent(new Event("records-stale"));
       const errors = status.error_details.length
         ? ` Primeros errores: ${status.error_details.slice(0, 3).join(" · ")}`
         : "";

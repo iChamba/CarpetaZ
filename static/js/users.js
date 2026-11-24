@@ -1,5 +1,5 @@
 import { extractRecord, previewFile, revealFile } from "./documents.js";
-import { appendYearGroups, element, formatSize, makeButton, requestJson, setMessage } from "./common.js";
+import { appendYearGroups, element, formatSize, initDirectoryToggle, makeButton, requestJson, setMessage } from "./common.js";
 
 const USER_PAGE_SIZE = 100;
 const FILE_PAGE_SIZE = 100;
@@ -10,11 +10,13 @@ let usersTotal = 0;
 let usersLoadGeneration = 0;
 let usersLoadPromise = null;
 let usersLoadKey = null;
+let userProfileRequest = 0;
 let loadedUsers = [];
 let loadedUsersQuery = null;
 let userListWarnings = 0;
 
 export function initUsers() {
+  initDirectoryToggle("user", "carpetas");
   document.getElementById("user-filter").addEventListener("submit", event => {
     event.preventDefault();
     usersOffset = 0;
@@ -62,7 +64,7 @@ async function refreshCatalog() {
   button.disabled = true;
   setMessage("user-message", "Iniciando actualización del catálogo…");
   try {
-    await requestJson("/api/index", { method: "POST" });
+    await requestJson("/api/catalog/refresh", { method: "POST" });
     await waitForCatalogRefresh();
   } catch (error) {
     button.disabled = false;
@@ -117,6 +119,7 @@ async function refreshCertificateImportStatus() {
       setMessage(
         "user-message",
         `${status.message}: ${status.imported} nuevos, ${status.updated} actualizados, ` +
+          `${status.unchanged} sin cambios, ` +
           `${status.without_text} sin texto, ${status.errors} errores.`,
       );
       window.setTimeout(refreshCertificateImportStatus, 1500);
@@ -127,7 +130,8 @@ async function refreshCertificateImportStatus() {
     if (status.has_run) {
       const summary =
         `Revisión terminada: ${status.imported} autorizaciones nuevas, ` +
-        `${status.updated} actualizadas, ${status.without_text} archivos sin texto, ` +
+        `${status.updated} actualizadas, ${status.unchanged} archivos sin cambios, ` +
+        `${status.without_text} archivos sin texto, ` +
         `${status.errors} errores de ${status.total} archivos revisados.`;
       const errorSummary = status.error_details.length
         ? ` Primeros errores: ${status.error_details.slice(0, 3).join(" · ")}`
@@ -200,7 +204,9 @@ async function loadUsersForQuery(query, authorization, status, practice, offset)
         "user-message",
         `${data.catalog.message}: ${data.catalog.processed} archivo(s) catalogados`,
       );
-      window.setTimeout(() => loadUsers(offset), 1200);
+      window.setTimeout(() => {
+        if (generation === usersLoadGeneration) loadUsers(offset);
+      }, 1200);
     } else if (!data.catalog.ready) {
       setMessage("user-message", data.catalog.message, "error");
     }
@@ -290,12 +296,37 @@ function normalizePractice(value) {
     .replace(/\s+/g, " ");
 }
 
+export async function openLinkedUser(name) {
+  const requestId = ++userProfileRequest;
+  selectedUser = "";
+  document.getElementById("user-query").value = name;
+  document.getElementById("user-authorization-filter").value = "all";
+  document.getElementById("user-status-filter").value = "";
+  document.getElementById("user-status-filter").disabled = false;
+  document.getElementById("user-practice-filter").value = "";
+  document.getElementById("user-practice-filter").disabled = false;
+  const profile = document.getElementById("user-profile");
+  profile.className = "user-profile empty-state";
+  profile.textContent = `Abriendo ficha de ${name}…`;
+  const loaded = await loadUsers(0);
+  if (requestId !== userProfileRequest) return false;
+  if (!loaded) {
+    profile.textContent = "No se pudo abrir la ficha del usuario.";
+    return false;
+  }
+  return loadUser(name);
+}
+
 async function loadUser(name, offset = 0) {
+  const requestId = ++userProfileRequest;
   selectedUser = name;
   selectedUserOffset = offset;
-  document.querySelectorAll(".user-list-item").forEach(button => {
+  document.querySelectorAll("#user-list .user-list-item").forEach(button => {
     button.classList.toggle("active", button.dataset.user === name);
   });
+  const profile = document.getElementById("user-profile");
+  profile.className = "user-profile empty-state";
+  profile.textContent = `Abriendo ficha de ${name}…`;
   setMessage("user-message", `Abriendo ficha de ${name}…`);
   try {
     const params = new URLSearchParams({
@@ -304,8 +335,9 @@ async function loadUser(name, offset = 0) {
       limit: String(FILE_PAGE_SIZE),
     });
     const data = await requestJson(`/api/user?${params}`);
+    if (requestId !== userProfileRequest) return false;
     renderUserProfile(data);
-    const activeUser = document.querySelector(".user-list-item.active .user-list-count");
+    const activeUser = document.querySelector("#user-list .user-list-item.active .user-list-count");
     if (activeUser) {
       activeUser.textContent =
         `${data.user.document_count} documentos · ${data.user.imported_count} importados`;
@@ -316,6 +348,8 @@ async function loadUser(name, offset = 0) {
     setMessage("user-message", `Ficha de ${name} cargada.${warning}`);
     return true;
   } catch (error) {
+    if (requestId !== userProfileRequest) return false;
+    profile.textContent = "No se pudo abrir la ficha del usuario.";
     setMessage("user-message", error.message, "error");
     return false;
   }
@@ -368,10 +402,6 @@ function renderPreviewPanel(scope) {
   const title = element("h3", "Vista previa");
   title.id = `${scope}-preview-title`;
   heading.append(title);
-  const download = element("a", "Descargar", "button secondary hidden");
-  download.id = `${scope}-download-link`;
-  download.href = "#";
-  heading.append(download);
   panel.append(heading);
   panel.append(element(
     "div",
@@ -453,7 +483,12 @@ function renderAuthorizationCard(record) {
   const status = authorizationStatus(record.expiry_date);
   const card = element("article", undefined, `authorization-card ${status.cardClass}`);
   const heading = element("div", undefined, "authorization-card-heading");
-  heading.append(element("h5", "Certificado de autorización individual"));
+  const title = element("div", undefined, "authorization-card-title");
+  title.append(element("h5", "Certificado de autorización individual"));
+  const sourceButton = makeButton("Ver documento", "preview", "button secondary small");
+  sourceButton.dataset.path = record.source_path;
+  title.append(sourceButton);
+  heading.append(title);
   heading.append(element(
     "span",
     status.label,
@@ -478,15 +513,17 @@ function renderAuthorizationCard(record) {
   });
   card.append(fields);
 
-  card.append(element("h6", "Equipos asociados"));
   const equipment = (record.equipment || "").split("\n").filter(line => line.trim());
+  const equipmentDetails = element("details", undefined, "authorization-equipment-details");
+  equipmentDetails.append(element("summary", `Equipos asociados (${equipment.length})`));
   if (equipment.length) {
     const list = element("ul", undefined, "authorization-equipment");
     equipment.forEach(item => list.append(element("li", item)));
-    card.append(list);
+    equipmentDetails.append(list);
   } else {
-    card.append(element("p", "No se identificaron equipos asociados.", "empty-list"));
+    equipmentDetails.append(element("p", "No se identificaron equipos asociados.", "empty-list"));
   }
+  card.append(equipmentDetails);
   card.append(element("p", record.source_path, "authorization-source"));
   if (record.needs_review) {
     card.append(element(
@@ -654,32 +691,27 @@ function renderImportedRecords(records) {
 }
 
 function renderDocuments(files, offset, limit, total) {
-  const wrap = element("div", undefined, "table-wrap user-files-wrap");
+  const wrap = element("div", undefined, "table-wrap user-files-wrap user-documents-wrap");
   const table = document.createElement("table");
   const head = document.createElement("thead");
   const heading = document.createElement("tr");
-  ["Documento", "Tipo", "Tamaño", "Creado", "Importación", "Acciones"].forEach(title => {
+  ["Documento", "Tipo", "Tamaño", "Creado", "Acciones"].forEach(title => {
     heading.append(element("th", title));
   });
   head.append(heading);
   table.append(head);
 
   const body = document.createElement("tbody");
-  appendYearGroups(body, files, 6, file => {
+  appendYearGroups(body, files, 5, file => {
     const row = document.createElement("tr");
-    row.append(element("td", file.path, "user-file-path"));
+    const pathCell = element("td", undefined, "user-file-path");
+    const filenameIndex = Math.max(file.path.lastIndexOf("/"), file.path.lastIndexOf("\\")) + 1;
+    pathCell.append(document.createTextNode(file.path.slice(0, filenameIndex)));
+    pathCell.append(element("strong", file.path.slice(filenameIndex)));
+    row.append(pathCell);
     row.append(element("td", file.extension));
     row.append(element("td", formatSize(file.size)));
     row.append(element("td", (file.created || "").slice(0, 10)));
-    row.append(element(
-      "td",
-      file.record
-        ? (file.is_authorization_certificate ? "Certificado importado" : "Datos importados")
-        : file.can_import
-          ? (file.is_authorization_certificate ? "Certificado pendiente" : "Pendiente")
-          : "No automática",
-    ));
-
     const actions = element("td", undefined, "actions");
     if (file.can_preview) {
       const preview = makeButton("Ver", "preview");
@@ -689,16 +721,9 @@ function renderDocuments(files, offset, limit, total) {
     const reveal = makeButton("Carpeta", "reveal");
     reveal.dataset.path = file.path;
     actions.append(reveal);
-    const download = document.createElement("a");
-    download.className = "button secondary small";
-    download.href = `/api/download?path=${encodeURIComponent(file.path)}`;
-    download.textContent = "Descargar";
-    actions.append(download);
-    if (file.can_import && (!file.record || file.is_authorization_certificate)) {
+    if (file.can_import && file.is_authorization_certificate) {
       const importButton = makeButton(
-        file.is_authorization_certificate
-          ? (file.record ? "Actualizar certificado" : "Importar certificado")
-          : "Importar",
+        file.record ? "Actualizar certificado" : "Importar certificado",
         "import",
       );
       importButton.dataset.path = file.path;
@@ -740,7 +765,9 @@ async function handleProfileAction(event) {
       ? `Ver autorizaciones anteriores (${previous.children.length})`
       : "Ocultar autorizaciones anteriores";
   } else if (button.dataset.action === "preview") {
-    button.closest(".preview-browser-layout").classList.remove("preview-hidden");
+    button.closest(".user-profile")
+    .querySelector(".preview-browser-layout")
+    .classList.remove("preview-hidden");
     previewFile(button.dataset.path, "user");
   } else if (button.dataset.action === "reveal") {
     revealFile(button.dataset.path, "user-message");

@@ -1,14 +1,18 @@
-import { element, requestJson, setMessage } from "./common.js";
+import {
+  element,
+  requestJson,
+  resetPreviewActions,
+  setMessage,
+  setPreviewCloseAction,
+  setPdfPreviewActions,
+} from "./common.js";
 
 export async function previewFile(path, scope = "user") {
   const extension = path.split(".").pop().toLowerCase();
   const content = document.getElementById(`${scope}-preview-content`);
   const title = document.getElementById(`${scope}-preview-title`);
-  const download = document.getElementById(`${scope}-download-link`);
-  const messageId = scope === "search" ? "search-message" : "user-message";
+  resetPreviewActions(title);
   title.textContent = path;
-  download.href = `/api/download?path=${encodeURIComponent(path)}`;
-  download.classList.remove("hidden");
   content.className = "preview-content";
   content.replaceChildren();
   const url = `/api/preview?path=${encodeURIComponent(path)}`;
@@ -18,8 +22,10 @@ export async function previewFile(path, scope = "user") {
     frame.title = `Vista previa de ${path}`;
     frame.src = url;
     content.append(frame);
+    setPdfPreviewActions(title, frame, () => closePreview(scope));
     return;
   }
+  setPreviewCloseAction(title, () => closePreview(scope));
   if (["jpg", "jpeg", "png"].includes(extension)) {
     const image = document.createElement("img");
     image.alt = path;
@@ -36,12 +42,26 @@ export async function previewFile(path, scope = "user") {
       }
       content.append(element("pre", await response.text()));
     } catch (error) {
-      setMessage(messageId, error.message, "error");
+      setMessage("user-message", error.message, "error");
     }
     return;
   }
   content.className = "preview-content empty-state";
-  content.textContent = "Este formato se puede descargar, pero no previsualizar.";
+  content.textContent = "Este formato no se puede previsualizar.";
+}
+
+function closePreview(scope) {
+  const content = document.getElementById(`${scope}-preview-content`);
+  const title = document.getElementById(`${scope}-preview-title`);
+  content.className = "preview-content empty-state";
+  content.textContent = "Selecciona un documento para verlo aquí.";
+  title.textContent = "Vista previa";
+  resetPreviewActions(title);
+
+  if (scope === "user") {
+    const browser = document.querySelector("#user-profile .preview-browser-layout");
+    if (browser) browser.classList.add("preview-hidden");
+  }
 }
 
 export async function revealFile(path, messageId = "user-message") {
@@ -80,7 +100,7 @@ export async function revealFolder(name, messageId = "records-message") {
 
 export async function extractRecord(
   path,
-  { navigateToRecords = true, messageId = "search-message" } = {},
+  { navigateToRecords = true, messageId = "user-message" } = {},
 ) {
   const statusMessageId = navigateToRecords ? messageId : "user-message";
   setMessage(statusMessageId, "Importando datos del documento…");
@@ -90,16 +110,9 @@ export async function extractRecord(
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ path }),
     });
-    let note = "Campos candidatos agregados. Revisa y corrige la fila antes de exportar.";
-    if (data.record.is_authorization_certificate) {
-      note = data.updated
-        ? "Autorización individual actualizada. La ficha comparará esta versión con las anteriores."
-        : "Autorización individual detectada e importada. La ficha comparará esta versión con las anteriores.";
-    } else if (data.updated) {
-      note = "Campos del certificado actualizados. Se conservaron los demás datos de la ficha.";
-    } else if (data.already_extracted) {
-      note = "Ese PDF ya estaba en la tabla; se conservaron tus ediciones.";
-    }
+    const note = data.updated
+      ? "Autorización individual actualizada. La ficha comparará esta versión con las anteriores."
+      : "Autorización individual detectada e importada. La ficha comparará esta versión con las anteriores.";
     if (navigateToRecords) {
       setMessage("records-message", note, "success");
       document.querySelector('[data-tab="records"]').click();

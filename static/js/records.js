@@ -1,23 +1,97 @@
 import { compareAuthorizationRecency } from "./users.js";
 import { element, makeButton, requestJson, setMessage } from "./common.js";
 import { revealFolder } from "./documents.js";
+import { workflowDeadline, workflowStatusGroup } from "./workflows.js";
 
 const RECORDS_PAGE_SIZE = 100;
+const LICENSE_STATUSES = [
+  { key: "valid", label: "Vigentes", className: "is-valid", detail: "VIGENTE" },
+  { key: "soon", label: "Próximas a vencer", className: "is-soon", detail: "PRÓXIMO A VENCERSE" },
+  { key: "expired", label: "Vencidas", className: "is-expired", detail: "VENCIDA" },
+  { key: "unknown", label: "Sin fecha", className: "is-unknown", detail: "SIN FECHA DE VENCIMIENTO" },
+];
 let recordsOffset = 0;
 let recordsTotal = 0;
+let licenseOffset = 0;
+let licenseTotal = 0;
+let licenseLoadGeneration = 0;
+let workflowRecordsGeneration = 0;
+const WORKFLOW_RECORD_GROUPS = [
+  { key: "on-time", label: "En curso · En plazo", className: "is-valid" },
+  { key: "warning", label: "En curso · Por vencer", className: "is-soon" },
+  { key: "overdue", label: "En curso · Vencidos", className: "is-expired" },
+  { key: "unavailable", label: "En curso · Plazo no disponible", className: "is-unknown" },
+  { key: "observed", label: "Observados", className: "is-pending" },
+  { key: "rejected", label: "Rechazados", className: "is-expired" },
+  { key: "completed", label: "Finalizados", className: "is-valid" },
+  { key: "delivered", label: "Entregados", className: "is-valid" },
+];
+
+export function workflowRecordsSummary(cases, supportsDeadline, now = Date.now()) {
+  const counts = Object.fromEntries(WORKFLOW_RECORD_GROUPS.map(group => [group.key, 0]));
+  for (const item of cases) {
+    let group = workflowStatusGroup(item);
+    if (group === "active") {
+      group = supportsDeadline ? workflowDeadline(item, now).tone : "unavailable";
+    }
+    counts[group] += 1;
+  }
+  return counts;
+}
 
 export function initRecords() {
   document.getElementById("record-rows").addEventListener("click", handleRecordAction);
-  document.getElementById("records-refresh").addEventListener("click", () => loadRecords(true, 0));
+  document.getElementById("records-refresh").addEventListener("click", () => loadRecords(true));
   document.getElementById("records-prev").addEventListener("click", () => {
-    loadRecords(false, Math.max(0, recordsOffset - RECORDS_PAGE_SIZE));
+    loadUserRecords(false, Math.max(0, recordsOffset - RECORDS_PAGE_SIZE));
   });
   document.getElementById("records-next").addEventListener("click", () => {
-    loadRecords(false, recordsOffset + RECORDS_PAGE_SIZE);
+    loadUserRecords(false, recordsOffset + RECORDS_PAGE_SIZE);
   });
+  document.getElementById("license-records-prev").addEventListener("click", () => {
+    loadLicenseRecords(Math.max(0, licenseOffset - RECORDS_PAGE_SIZE));
+  });
+  document.getElementById("license-records-next").addEventListener("click", () => {
+    loadLicenseRecords(licenseOffset + RECORDS_PAGE_SIZE);
+  });
+  window.setInterval(() => {
+    if (document.getElementById("pane-records").classList.contains("active")) {
+      loadWorkflowRecords();
+    }
+  }, 30000);
 }
 
-export async function loadRecords(forceRefresh = false, offset = recordsOffset) {
+export async function loadRecords(forceRefresh = false) {
+  const results = await Promise.all([
+    loadUserRecords(forceRefresh),
+    loadLicenseRecords(forceRefresh ? 0 : licenseOffset),
+    loadWorkflowRecords(),
+  ]);
+  return results.every(Boolean);
+}
+
+export async function loadWorkflowRecords() {
+  const generation = ++workflowRecordsGeneration;
+  const container = document.getElementById("workflow-records-groups");
+  try {
+    const data = await requestJson("/api/workflow");
+    if (generation !== workflowRecordsGeneration) return false;
+    const supported = data.supports_observation_deadline === true;
+    renderRecordsSummary("workflow-records-groups",
+      workflowRecordsSummary(data.cases, supported), WORKFLOW_RECORD_GROUPS);
+    setMessage("workflow-records-message", supported ? "" :
+      "Reinicia la aplicación para calcular el estado temporal de los trámites.");
+    return true;
+  } catch (error) {
+    if (generation === workflowRecordsGeneration) {
+      container.replaceChildren();
+      setMessage("workflow-records-message", `No se pudieron cargar los trámites: ${error.message}`, "error");
+    }
+    return false;
+  }
+}
+
+async function loadUserRecords(forceRefresh = false, offset = recordsOffset) {
   const body = document.getElementById("record-rows");
   body.replaceChildren();
   const summary = document.getElementById("records-summary");
@@ -31,7 +105,11 @@ export async function loadRecords(forceRefresh = false, offset = recordsOffset) 
     const users = data.items;
     recordsOffset = data.offset;
     recordsTotal = data.total;
-    renderRecordsSummary(data.summary);
+    renderRecordsSummary("records-summary", data.summary, [
+      ...LICENSE_STATUSES,
+      { key: "pending", label: "Pendientes de importar", className: "is-pending" },
+      { key: "none", label: "Sin autorización", className: "is-empty" },
+    ]);
     for (const user of users) {
       const latestRecord = [...(user.authorization_records || [])]
         .sort(compareAuthorizationRecency)[0];
@@ -40,13 +118,12 @@ export async function loadRecords(forceRefresh = false, offset = recordsOffset) 
 
       if (!latestRecord) {
         const folderCell = document.createElement("td");
-        folderCell.colSpan = 9;
+        folderCell.colSpan = 8;
         const folderButton = makeButton("Ver carpeta", "open-folder");
         folderButton.dataset.name = user.name;
         folderCell.append(folderButton);
         row.append(folderCell);
       } else {
-        row.dataset.id = latestRecord.id;
         const sourceCell = document.createElement("td");
         const viewLink = document.createElement("a");
         viewLink.href = `/api/preview?path=${encodeURIComponent(latestRecord.source_path)}`;
@@ -56,16 +133,12 @@ export async function loadRecords(forceRefresh = false, offset = recordsOffset) 
         viewLink.textContent = "Ver archivo";
         sourceCell.append(viewLink);
         row.append(sourceCell);
-        row.append(recordInput(latestRecord, "first_name", "Nombre"));
-        row.append(recordInput(latestRecord, "identity_number", "Cédula"));
-        row.append(recordInput(latestRecord, "authorization_number", "Número de autorización"));
-        row.append(recordInput(latestRecord, "practice", "Práctica"));
-        row.append(recordInput(latestRecord, "issue_date", "Fecha de expedición"));
-        row.append(recordInput(latestRecord, "expiry_date", "Fecha de vencimiento"));
-        row.append(recordInput(latestRecord, "equipment", "Equipos asociados", true));
-        const saveCell = document.createElement("td");
-        saveCell.append(makeButton("Guardar", "save-record", "button primary small"));
-        row.append(saveCell);
+        for (const field of [
+          "first_name", "identity_number", "authorization_number", "practice",
+          "issue_date", "expiry_date", "equipment",
+        ]) {
+          row.append(element("td", latestRecord[field] || ""));
+        }
       }
 
       body.append(row);
@@ -87,16 +160,97 @@ export async function loadRecords(forceRefresh = false, offset = recordsOffset) 
   }
 }
 
-function renderRecordsSummary(counts) {
-  const summary = document.getElementById("records-summary");
-  const statuses = [
-    { key: "valid", label: "Vigentes", className: "is-valid" },
-    { key: "soon", label: "Próximas a vencer", className: "is-soon" },
-    { key: "expired", label: "Vencidas", className: "is-expired" },
-    { key: "unknown", label: "Sin fecha", className: "is-unknown" },
-    { key: "pending", label: "Pendientes de importar", className: "is-pending" },
-    { key: "none", label: "Sin autorización", className: "is-empty" },
-  ];
+async function loadLicenseRecords(offset = licenseOffset) {
+  const generation = ++licenseLoadGeneration;
+  const container = document.getElementById("license-records");
+  const previous = document.getElementById("license-records-prev");
+  const next = document.getElementById("license-records-next");
+  previous.disabled = true;
+  next.disabled = true;
+  setMessage("license-records-message", "Cargando licencias…");
+  try {
+    const params = new URLSearchParams({
+      offset: String(offset),
+      limit: String(RECORDS_PAGE_SIZE),
+    });
+    const data = await requestJson(`/api/entity/licenses?${params}`);
+    if (generation !== licenseLoadGeneration) return false;
+    licenseOffset = data.offset;
+    licenseTotal = data.total;
+    renderRecordsSummary("license-records-summary", data.summary, LICENSE_STATUSES);
+    container.replaceChildren();
+    let practice;
+    let body;
+    for (const license of data.items) {
+      if (license.practice !== practice) {
+        practice = license.practice;
+        const section = element("section", undefined, "license-records-practice");
+        section.append(element("h4", practice));
+        const wrap = element("div", undefined, "table-wrap");
+        const table = document.createElement("table");
+        const head = document.createElement("thead");
+        const header = document.createElement("tr");
+        [
+          "Institución", "Licencia", "Representante legal", "N.º autorización",
+          "Expedición", "Vencimiento", "Estado", "Documentos",
+        ].forEach(label => header.append(element("th", label)));
+        head.append(header);
+        body = document.createElement("tbody");
+        table.append(head, body);
+        wrap.append(table);
+        section.append(wrap);
+        container.append(section);
+      }
+      const row = document.createElement("tr");
+      for (const field of [
+        "institution", "license_number", "representative",
+        "authorization_number", "issue_date", "expiry_date",
+      ]) {
+        row.append(element("td", license[field] || "Sin dato"));
+      }
+      const status = LICENSE_STATUSES.find(item => item.key === license.status);
+      const statusCell = document.createElement("td");
+      statusCell.append(element("span", status.detail, `authorization-status ${status.className}`));
+      row.append(statusCell);
+      const sources = document.createElement("td");
+      for (const documentSource of license.documents) {
+        const link = element("a", documentSource.name);
+        link.href = `/api/entity/preview?path=${encodeURIComponent(documentSource.path)}`;
+        link.target = "_blank";
+        link.rel = "noopener noreferrer";
+        sources.append(link, document.createElement("br"));
+      }
+      row.append(sources);
+      body.append(row);
+    }
+    const first = licenseTotal ? licenseOffset + 1 : 0;
+    const last = Math.min(licenseOffset + data.items.length, licenseTotal);
+    document.getElementById("license-records-page-label").textContent =
+      `${first}–${last} de ${licenseTotal} licencias`;
+    previous.disabled = licenseOffset <= 0;
+    next.disabled = licenseOffset + data.items.length >= licenseTotal;
+    if (data.warnings) {
+      setMessage("license-records-message", `Se omitieron ${data.warnings} ubicaciones inaccesibles.`, "error");
+    } else if (!data.catalog.ready) {
+      setMessage("license-records-message", data.catalog.message);
+    } else {
+      setMessage("license-records-message", licenseTotal ? "" : "No hay licencias procesadas.");
+    }
+    return true;
+  } catch (error) {
+    if (generation === licenseLoadGeneration) {
+      container.replaceChildren();
+      document.getElementById("license-records-summary").replaceChildren();
+      document.getElementById("license-records-page-label").textContent = "";
+      setMessage("license-records-message", `No se pudieron cargar las licencias: ${error.message}`, "error");
+    }
+    return false;
+  }
+}
+
+function renderRecordsSummary(id, counts, statuses) {
+  const summary = document.getElementById(id);
+  summary.replaceChildren();
   for (const status of statuses) {
     const card = element("div", undefined, `records-summary-card ${status.className}`);
     card.append(element("span", status.label, "records-summary-label"));
@@ -105,43 +259,9 @@ function renderRecordsSummary(counts) {
   }
 }
 
-function recordInput(record, field, label, multiline = false) {
-  const cell = document.createElement("td");
-  const input = document.createElement(multiline ? "textarea" : "input");
-  input.value = record[field] || "";
-  input.setAttribute("aria-label", label);
-  input.dataset.field = field;
-  cell.append(input);
-  return cell;
-}
-
 async function handleRecordAction(event) {
   const folderButton = event.target.closest("button[data-action='open-folder']");
   if (folderButton) {
     await revealFolder(folderButton.dataset.name, "records-message");
-    return;
-  }
-
-  const button = event.target.closest("button[data-action='save-record']");
-  if (!button) return;
-  const row = button.closest("tr");
-  const fields = {};
-  row.querySelectorAll("[data-field]").forEach(input => {
-    fields[input.dataset.field] = input.value;
-  });
-  button.disabled = true;
-  try {
-    await requestJson("/api/records/update", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ id: row.dataset.id, fields }),
-    });
-    window.dispatchEvent(new Event("users-stale"));
-    await loadRecords();
-    setMessage("records-message", "Registro guardado.", "success");
-  } catch (error) {
-    setMessage("records-message", error.message, "error");
-  } finally {
-    button.disabled = false;
   }
 }

@@ -3,77 +3,146 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Documentos locales</title>
+  <title>CarpetaZ</title>
+  <link rel="stylesheet" href="/theme/tokens.css">
   <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
   <header class="topbar">
     <div>
-      <h1>Documentos locales</h1>
+      <h1>CarpetaZ</h1>
       <p>Explorar, buscar y revisar archivos en una carpeta</p>
     </div>
-    <div class="index-status" id="index-status" role="status">Comprobando índice…</div>
+    <div class="topbar-right">
+      <div class="workflow-session">
+        <span id="workflow-current-user"></span>
+        <button type="button" class="button secondary" id="workflow-logout">Cerrar sesión</button>
+      </div>
+      <div class="notice" id="session-message" role="status"></div>
+      <div class="index-status" id="catalog-status" role="status">Comprobando catálogo…</div>
+    </div>
   </header>
 
   <nav class="tabs" aria-label="Secciones">
-    <button class="tab active" data-tab="users">Usuarios</button>
+    <button class="tab active" data-tab="workflows">Mis Trámites</button>
+    <button class="tab" data-tab="inspections">Mis Inspecciones</button>
+    <button class="tab" data-tab="users">Usuarios</button>
     <button class="tab" data-tab="entities">Entidades usuarias</button>
-    <button class="tab" data-tab="search">Buscar en PDF</button>
     <button class="tab" data-tab="records">Datos extraídos</button>
-    <button class="tab" data-tab="workbooks">Editar Excel</button>
   </nav>
 
   <main>
-    <section class="pane active" id="pane-users">
+    <section class="pane" id="pane-inspections">
       <div class="section-heading">
-        <div>
-          <h2>Usuarios</h2>
-          <p>Cada carpeta de primer nivel representa un usuario. Importa los datos de sus documentos por separado.</p>
+        <div><h2>Mis Inspecciones</h2><p>Consulta las inspecciones y su calendario.</p></div>
+      </div>
+      <div class="notice" id="inspection-message" role="status"></div>
+      <details class="workflow-create-panel hidden" id="inspection-create-panel">
+        <summary>Nueva Inspección</summary>
+        <form id="inspection-form" class="workflow-form">
+          <label>Fecha de solicitud<input name="application_date" type="date"></label>
+          <label>Número de trámite<input name="case_number" maxlength="100"></label>
+          <label>Institución o empresa<input name="company_name" maxlength="255"></label>
+          <label>RUT<input name="rut" maxlength="100"></label>
+          <label>Tipo de solicitud<select name="request_type">
+            <option value="">Sin especificar</option>
+            <option value="inicial">Autorización inicial</option>
+            <option value="renovacion">Renovación</option>
+          </select></label>
+          <label>Tipo de inspección<input name="inspection_type" maxlength="160"></label>
+          <label>Práctica<input name="practice" maxlength="160"></label>
+          <label>Modelo de equipo a inspeccionar<input name="equipment_model" maxlength="200"></label>
+          <label>Datos de contacto<input name="contact_details" maxlength="255"></label>
+          <label>Teléfono<input name="phone" type="tel" maxlength="100"></label>
+          <label>Domicilio<input name="address" maxlength="255"></label>
+          <label>Ciudad<input name="city" maxlength="160"></label>
+          <label>Email<input name="email" type="email" maxlength="254"></label>
+          <button type="submit" class="button workflow-approve">Crear inspección</button>
+          <p class="form-help">Los datos son opcionales. Jefe de Inspección asignará al inspector.</p>
+        </form>
+      </details>
+      <div class="inspection-layout">
+        <div class="inspection-column">
+          <section class="inspection-list">
+            <h3>Inspecciones</h3>
+            <div class="table-wrap">
+              <table class="workflow-table">
+                <thead><tr><th>Número de trámite</th><th>Institución o empresa</th><th>Inspector líder</th><th>Etapa</th></tr></thead>
+                <tbody id="inspection-rows"></tbody>
+              </table>
+            </div>
+          </section>
+          <section class="inspection-calendar" aria-labelledby="inspection-calendar-title">
+            <h3 id="inspection-calendar-title">Calendario de inspecciones</h3>
+            <div class="inspection-calendar-nav">
+              <button type="button" class="button secondary small" id="inspection-prev-month">Mes anterior</button>
+              <strong id="inspection-month" aria-live="polite"></strong>
+              <button type="button" class="button secondary small" id="inspection-next-month">Mes siguiente</button>
+            </div>
+            <table class="inspection-calendar-grid">
+              <thead><tr><th>Lun</th><th>Mar</th><th>Mié</th><th>Jue</th><th>Vie</th><th>Sáb</th><th>Dom</th></tr></thead>
+              <tbody id="inspection-calendar-days"></tbody>
+            </table>
+            <p class="form-help">Las inspecciones aparecen al completar el checklist previo y agendar fecha, hora y lugar.</p>
+          </section>
         </div>
+        <section id="inspection-detail" class="workflow-detail empty-state" aria-live="polite">Selecciona una inspección para ver sus datos.</section>
+      </div>
+    </section>
+
+    <section class="pane" id="pane-users">
+      <div class="catalog-toolbar">
         <form id="user-filter" class="inline-form">
           <input id="user-query" type="search" placeholder="Buscar usuario" aria-label="Buscar usuario">
           <button type="submit" class="button primary">Buscar</button>
-          <button type="button" class="button secondary" id="user-refresh">Actualizar catálogo</button>
-          <button type="button" class="button secondary" id="import-certificates">
+        </form>
+        <div class="user-filters" aria-label="Filtros de usuarios">
+          <label>
+            Autorización
+            <select id="user-authorization-filter">
+              <option value="all">Todas</option>
+              <option value="with">Con autorización</option>
+              <option value="without">Sin autorización</option>
+            </select>
+          </label>
+          <label>
+            Estado
+            <select id="user-status-filter">
+              <option value="">Todos los estados</option>
+              <option value="expired">Vencida</option>
+              <option value="soon">Próxima a vencerse</option>
+              <option value="valid">Vigente</option>
+              <option value="unknown">Sin fecha de vencimiento</option>
+              <option value="pending">Pendiente de importar</option>
+            </select>
+          </label>
+          <label>
+            Práctica
+            <input id="user-practice-filter" type="search" placeholder="Ej.: tomografía, radioterapia" aria-label="Filtrar por práctica">
+          </label>
+        </div>
+        <div class="catalog-toolbar-actions">
+          <button type="button" class="button primary" id="user-refresh">Actualizar catálogo</button>
+          <button type="button" class="button primary" id="import-certificates">
             Importar certificados de todos
           </button>
-        </form>
-      </div>
-      <div class="user-filters" aria-label="Filtros de usuarios">
-        <label>
-          Autorización
-          <select id="user-authorization-filter">
-            <option value="all">Todas</option>
-            <option value="with">Con autorización</option>
-            <option value="without">Sin autorización</option>
-          </select>
-        </label>
-        <label>
-          Estado
-          <select id="user-status-filter">
-            <option value="">Todos los estados</option>
-            <option value="expired">Vencida</option>
-            <option value="soon">Próxima a vencerse</option>
-            <option value="valid">Vigente</option>
-            <option value="unknown">Sin fecha de vencimiento</option>
-            <option value="pending">Pendiente de importar</option>
-          </select>
-        </label>
-        <label>
-          Práctica
-          <input id="user-practice-filter" type="search" placeholder="Ej.: tomografía, radioterapia" aria-label="Filtrar por práctica">
-        </label>
+        </div>
       </div>
       <div class="notice" id="user-message" role="status"></div>
-      <div class="user-layout">
-        <aside class="user-directory">
-          <h3>Carpetas</h3>
-          <div id="user-list" class="user-list"></div>
-          <div class="user-list-pagination">
-            <span id="user-page-label"></span>
-            <div>
-              <button class="button secondary small" id="user-prev" disabled>Anterior</button>
-              <button class="button secondary small" id="user-next" disabled>Siguiente</button>
+      <div class="user-layout" id="user-layout">
+        <aside class="user-directory user-folder-directory">
+          <div class="user-directory-heading">
+            <h3>Carpetas</h3>
+            <button type="button" class="button secondary small user-directory-toggle" id="user-directory-toggle" aria-controls="user-directory-content" aria-expanded="true" aria-label="Ocultar carpetas">‹ Ocultar</button>
+          </div>
+          <div id="user-directory-content">
+            <div id="user-list" class="user-list"></div>
+            <div class="user-list-pagination">
+              <span id="user-page-label"></span>
+              <div>
+                <button class="button secondary small" id="user-prev" disabled>Anterior</button>
+                <button class="button secondary small" id="user-next" disabled>Siguiente</button>
+              </div>
             </div>
           </div>
         </aside>
@@ -83,41 +152,240 @@
       </div>
     </section>
 
-    <section class="pane" id="pane-entities">
+    <section class="pane active" id="pane-workflows">
       <div class="section-heading">
         <div>
-          <h2>Entidades usuarias</h2>
-          <p>Busca instituciones y explora sus documentos por práctica, departamento y localidad. Las divisiones numeradas de cada centro no aparecen como instituciones separadas. Cada licencia corresponde a una práctica.</p>
+          <h2>Mis Trámites</h2>
+          <p>Consulta responsables, etapas, acciones e historial de cada trámite.</p>
         </div>
+      </div>
+      <div class="notice" id="workflow-message" role="status"></div>
+      <div class="notice error hidden" id="workflow-observed-update-warning" role="status">Reinicia la aplicación para ver los trámites observados correctamente.</div>
+      <details class="workflow-create-panel">
+        <summary>Iniciar un trámite</summary>
+        <form id="workflow-case-form" class="workflow-form">
+          <div class="workflow-create-top">
+            <label>Tipo de trámite
+              <select id="workflow-case-definition" required></select>
+            </label>
+            <label id="workflow-request-type-field" class="hidden">Solicitud
+              <select id="workflow-request-type">
+                <option value="">Selecciona un tipo</option>
+                <option value="nueva">Nueva</option>
+                <option value="renovacion">Renovación</option>
+                <option value="modificacion">Modificación</option>
+              </select>
+            </label>
+            <div id="workflow-linked-user-field" class="workflow-link-field hidden">
+              <div class="workflow-link-column">
+                <label>Buscar carpeta de usuario
+                  <input id="workflow-linked-user-query" type="search" placeholder="Nombre, apellido o cédula">
+                </label>
+                <button type="button" class="button secondary small" id="workflow-linked-user-search">Buscar carpeta</button>
+              </div>
+              <div class="workflow-link-column">
+                <label><span>Carpeta de usuario <span id="workflow-link-requirement">(opcional)</span></span>
+                  <select id="workflow-linked-user"><option value="">Selecciona una carpeta</option></select>
+                </label>
+                <div class="workflow-link-pagination">
+                  <span id="workflow-linked-user-page"></span>
+                  <button type="button" class="button secondary small" id="workflow-linked-user-prev">Anterior</button>
+                  <button type="button" class="button secondary small" id="workflow-linked-user-next">Siguiente</button>
+                </div>
+              </div>
+              <p id="workflow-linked-user-note" class="form-help" aria-live="polite"></p>
+            </div>
+            <div id="workflow-linked-entity-field" class="workflow-link-field hidden">
+              <div class="workflow-link-column">
+                <label>Buscar entidad
+                  <input id="workflow-linked-entity-query" type="search" placeholder="Nombre de la entidad">
+                </label>
+                <button type="button" class="button secondary small" id="workflow-linked-entity-search">Buscar entidad</button>
+              </div>
+              <div class="workflow-link-column">
+                <label><span>Carpeta de entidad <span id="workflow-entity-link-requirement">(opcional)</span></span>
+                  <select id="workflow-linked-entity"><option value="">Selecciona una entidad</option></select>
+                </label>
+              </div>
+              <p id="workflow-linked-entity-note" class="form-help" aria-live="polite"></p>
+            </div>
+            <label id="workflow-create-inspector-field" class="hidden">Funcionario de Inspección
+              <select id="workflow-create-inspector" disabled></select>
+            </label>
+          </div>
+          <fieldset id="workflow-application-fields" class="workflow-application-fields hidden" disabled>
+            <legend>Datos de la solicitud</legend>
+            <label>Fecha de solicitud<input name="application_date" type="date" required></label>
+            <label>Número de formulario<input name="form_number" maxlength="100" required></label>
+            <label>Código corto<input name="short_code" maxlength="100" required></label>
+            <label>Nombre<input name="first_name" maxlength="160" required></label>
+            <label>Apellido<input name="last_name" maxlength="160" required></label>
+            <label>CI<input name="identity_number" maxlength="100" required></label>
+            <label>Profesión<input name="profession" maxlength="160" required></label>
+            <label>Práctica<input name="practice" maxlength="160" required></label>
+            <label>Lugar de trabajo<input name="workplace" maxlength="200" required></label>
+            <label>Correo<input name="email" type="email" maxlength="254" required></label>
+            <label>Código asignado<input name="assigned_code" maxlength="100" required></label>
+            <label>Firma digital
+              <select name="digital_signature" required>
+                <option value="">Selecciona una opción</option>
+                <option value="yes">Sí</option>
+                <option value="no">No</option>
+              </select>
+            </label>
+          </fieldset>
+          <fieldset id="workflow-entity-application-fields" class="workflow-application-fields hidden" disabled>
+            <legend>Datos de la solicitud</legend>
+            <label>Fecha de solicitud<input name="application_date" type="date" required></label>
+            <label>Número de formulario<input name="form_number" maxlength="100" required></label>
+            <label>Empresa/institución<input name="company_name" maxlength="255" required></label>
+            <label>Práctica<input name="practice" maxlength="160" required></label>
+            <label>Código<input name="code" maxlength="100" required></label>
+            <label>Firma digital
+              <select name="digital_signature" required>
+                <option value="">Selecciona una opción</option>
+                <option value="yes">Sí</option>
+                <option value="no">No</option>
+              </select>
+            </label>
+          </fieldset>
+          <p id="workflow-application-update-warning" class="workflow-application-warning hidden" role="status">Reinicia la aplicación para iniciar trámites con el formulario actualizado.</p>
+          <label class="workflow-description">Descripción
+            <textarea id="workflow-case-description" maxlength="2000" rows="3"></textarea>
+          </label>
+          <button type="submit" class="button primary" id="workflow-create-submit">Crear trámite</button>
+        </form>
+      </details>
+      <div class="workflow-layout">
+        <section>
+          <div class="workflow-list-heading">
+            <h3>Trámites</h3>
+            <div class="workflow-list-actions">
+              <a class="button secondary small hidden" id="workflow-export" href="/api/workflow/export">Exportar trámites e historial (.xlsx)</a>
+              <button type="button" class="button secondary small" id="workflow-refresh">Actualizar</button>
+            </div>
+          </div>
+          <label class="workflow-search">Buscar trámites
+            <input id="workflow-case-search" type="search" placeholder="Nombre, cédula, institución, número, código…">
+          </label>
+          <p id="workflow-case-search-note" class="form-help hidden">Reinicia la aplicación para habilitar la búsqueda completa.</p>
+          <div class="workflow-case-tabs" id="workflow-case-tabs" role="group" aria-label="Grupos de trámites"></div>
+          <div class="table-wrap">
+            <table class="workflow-table">
+              <thead><tr><th>Tipo</th><th>Solicitante / entidad</th><th>Etapa</th><th>Responsable</th><th>Estado</th><th>Plazo</th></tr></thead>
+              <tbody id="workflow-case-rows"></tbody>
+            </table>
+          </div>
+        </section>
+        <section id="workflow-case-detail" class="workflow-detail empty-state">
+          Selecciona un trámite para ver su información e historial.
+        </section>
+      </div>
+      <details id="workflow-admin-panel" class="workflow-admin-panel hidden">
+        <summary>Administración de usuarios y flujos</summary>
+        <div class="workflow-admin-grid">
+          <form id="workflow-user-form" class="workflow-form">
+            <h3>Crear usuario</h3>
+            <label>Nombre visible<input id="workflow-user-name" maxlength="100" required></label>
+            <label>Usuario (3–40 caracteres)<input id="workflow-username" maxlength="40" pattern="[A-Za-z0-9._\-]{3,40}" required></label>
+            <label>Contraseña (mínimo 12 caracteres)<input id="workflow-user-password" type="password" minlength="12" maxlength="256" autocomplete="new-password" required></label>
+            <label>Rol
+              <select id="workflow-user-role">
+                <option value="administracion">Secretaría</option>
+                <option value="inspeccion">Inspección</option>
+                <option value="jefe_inspeccion">Jefe de Inspección</option>
+                <option value="jefe_licenciamiento">Jefe de Licenciamiento</option>
+                <option value="abogado">Abogado</option>
+                <option value="director">Director</option>
+                <option value="admin">Administrador</option>
+              </select>
+            </label>
+            <button type="submit" class="button primary">Crear usuario</button>
+          </form>
+          <form id="workflow-group-form" class="workflow-form">
+            <h3>Crear grupo</h3>
+            <label>Nombre del grupo<input id="workflow-group-name" maxlength="80" required></label>
+            <label>Integrantes<select id="workflow-group-members" multiple required size="5"></select></label>
+            <button type="submit" class="button primary">Crear grupo</button>
+          </form>
+          <form id="workflow-definition-form" class="workflow-form">
+            <h3>Crear flujo secuencial</h3>
+            <label>Nombre<input id="workflow-definition-name" maxlength="100" required></label>
+            <label>Descripción<input id="workflow-definition-description" maxlength="500"></label>
+            <label>Etapas (una por línea, mínimo 2)
+              <textarea id="workflow-definition-stages" rows="6" required></textarea>
+            </label>
+            <button type="submit" class="button primary">Crear flujo</button>
+          </form>
+          <form id="workflow-transition-form" class="workflow-form">
+            <h3>Agregar acción o devolución</h3>
+            <label>Flujo<select id="workflow-transition-definition"></select></label>
+            <label>Desde<select id="workflow-transition-from"></select></label>
+            <label>Hacia<select id="workflow-transition-to"></select></label>
+            <label>Nombre de la acción<input id="workflow-transition-label" maxlength="120" required></label>
+            <button type="submit" class="button primary">Agregar acción</button>
+            <p class="form-help">Las acciones se configuran antes de iniciar trámites en ese flujo.</p>
+          </form>
+        </div>
+        <div id="workflow-stage-assignments"></div>
+      </details>
+    </section>
+
+    <section class="pane" id="pane-entities">
+      <div class="catalog-toolbar">
         <form id="entity-filter" class="inline-form">
           <input id="entity-query" type="search" placeholder="Buscar institución" aria-label="Buscar institución">
           <button type="submit" class="button primary">Buscar</button>
-          <button type="button" class="button secondary" id="entity-refresh">Actualizar catálogo</button>
-          <button type="button" class="button primary" id="import-entity-licenses">Procesar licencias</button>
         </form>
-      </div>
-      <div class="entity-filters" aria-label="Filtros de entidades">
-        <label>Práctica
-          <select id="entity-practice-filter"><option value="">Todas las prácticas</option></select>
-        </label>
-        <label>Departamento
-          <select id="entity-department-filter"><option value="">Todos los departamentos</option></select>
-        </label>
-        <label>Localidad
-          <select id="entity-locality-filter"><option value="">Todas las localidades</option></select>
-        </label>
+        <div class="entity-filters" aria-label="Filtros de entidades">
+          <label>Práctica
+            <select id="entity-practice-filter"><option value="">Todas las prácticas</option></select>
+          </label>
+          <label>Departamento
+            <select id="entity-department-filter"><option value="">Todos los departamentos</option></select>
+          </label>
+          <label>Localidad
+            <select id="entity-locality-filter"><option value="">Todas las localidades</option></select>
+          </label>
+          <label>Licencia
+            <select id="entity-license-filter">
+              <option value="">Todas</option>
+              <option value="with">Con licencia</option>
+              <option value="without">Sin licencia</option>
+            </select>
+          </label>
+          <label>Estado
+            <select id="entity-license-status-filter">
+              <option value="">Todos los estados</option>
+              <option value="expired">Vencida</option>
+              <option value="soon">Próxima a vencerse</option>
+              <option value="valid">Vigente</option>
+              <option value="unknown">Sin fecha de vencimiento</option>
+              <option value="pending">Pendiente de procesar</option>
+            </select>
+          </label>
+        </div>
+        <div class="catalog-toolbar-actions">
+          <button type="button" class="button primary" id="entity-refresh">Actualizar catálogo</button>
+          <button type="button" class="button primary" id="import-entity-licenses">Procesar licencias</button>
+        </div>
       </div>
       <p class="entity-copy-note">Si todavía se están copiando archivos, actualiza la lista y vuelve a procesar las licencias cuando termine la copia.</p>
       <div class="notice" id="entity-message" role="status"></div>
-      <div class="user-layout">
-        <aside class="user-directory">
-          <h3>Instituciones</h3>
-          <div id="entity-list" class="user-list"></div>
-          <div class="user-list-pagination">
-            <span id="entity-page-label"></span>
-            <div>
-              <button class="button secondary small" id="entity-prev" disabled>Anterior</button>
-              <button class="button secondary small" id="entity-next" disabled>Siguiente</button>
+      <div class="user-layout" id="entity-layout">
+        <aside class="user-directory user-folder-directory">
+          <div class="user-directory-heading">
+            <h3>Instituciones</h3>
+            <button type="button" class="button secondary small user-directory-toggle" id="entity-directory-toggle" aria-controls="entity-directory-content" aria-expanded="true" aria-label="Ocultar instituciones">‹ Ocultar</button>
+          </div>
+          <div id="entity-directory-content">
+            <div id="entity-list" class="user-list"></div>
+            <div class="user-list-pagination">
+              <span id="entity-page-label"></span>
+              <div>
+                <button class="button secondary small" id="entity-prev" disabled>Anterior</button>
+                <button class="button secondary small" id="entity-next" disabled>Siguiente</button>
+              </div>
             </div>
           </div>
         </aside>
@@ -127,100 +395,66 @@
       </div>
     </section>
 
-    <section class="pane" id="pane-search">
-      <div class="section-heading">
-        <div>
-          <h2>Buscar dentro de PDF</h2>
-          <p>Busca palabras o números en el texto seleccionable de los PDF.</p>
-        </div>
-        <button id="rebuild-index" class="button secondary">Actualizar índice</button>
-      </div>
-      <form id="pdf-search-form" class="search-form">
-        <input id="pdf-query" type="search" maxlength="200" placeholder="Ej.: apellido, cédula o número de autorización" required>
-        <button type="submit" class="button primary">Buscar</button>
-      </form>
-      <div class="notice" id="search-message" role="status"></div>
-      <div class="table-wrap">
-        <table>
-          <thead><tr><th>Archivo</th><th>Coincidencia</th><th>Acciones</th></tr></thead>
-          <tbody id="search-rows"></tbody>
-        </table>
-      </div>
-      <aside class="preview-panel search-preview-panel">
-        <div class="preview-title">
-          <h3 id="search-preview-title">Vista previa</h3>
-          <a id="search-download-link" class="button secondary hidden" href="#">Descargar</a>
-        </div>
-        <div id="search-preview-content" class="preview-content empty-state">
-          Selecciona un resultado para verlo aquí.
-        </div>
-      </aside>
-    </section>
-
     <section class="pane" id="pane-records">
       <div class="section-heading">
         <div>
           <h2>Datos extraídos</h2>
-          <p>Revisa y corrige los campos antes de exportar. Los candidatos automáticos pueden requerir corrección.</p>
+          <p>Consulta los datos extraídos antes de exportar. La extracción automática puede contener errores.</p>
         </div>
         <div class="actions">
           <button id="records-refresh" class="button secondary">Actualizar lista</button>
-          <a class="button primary" href="/api/records/export">Exportar a Excel (.xlsx)</a>
+          <a class="button primary" href="/api/records/export">Exportar autorizaciones a Excel (.xlsx)</a>
         </div>
       </div>
       <div class="notice" id="records-message" role="status"></div>
+      <section class="workflow-records-section">
+        <h3>Trámites por estado</h3>
+        <div class="notice" id="workflow-records-message" role="status"></div>
+        <div id="workflow-records-groups" class="records-summary" aria-label="Resumen de trámites"></div>
+      </section>
+      <h3>Autorizaciones individuales</h3>
       <div id="records-summary" class="records-summary" aria-label="Resumen de autorizaciones"></div>
-      <div class="pagination">
-        <span id="records-page-label"></span>
-        <div>
-          <button class="button secondary" id="records-prev" disabled>Usuarios anteriores</button>
-          <button class="button secondary" id="records-next" disabled>Usuarios siguientes</button>
+      <details class="records-list-toggle">
+        <summary>Lista de usuarios</summary>
+        <div class="pagination">
+          <span id="records-page-label"></span>
+          <div>
+            <button class="button secondary" id="records-prev" disabled>Usuarios anteriores</button>
+            <button class="button secondary" id="records-next" disabled>Usuarios siguientes</button>
+          </div>
         </div>
-      </div>
-      <div class="table-wrap records-scroll-wrap">
-        <table class="records-table">
-          <thead>
-            <tr>
-              <th>Usuario</th><th>Documento de origen</th><th>Nombre</th><th>Cédula</th>
-              <th>N.º autorización</th><th>Práctica</th><th>Expedición</th><th>Vencimiento</th>
-              <th>Equipos asociados</th><th></th>
-            </tr>
-          </thead>
-          <tbody id="record-rows"></tbody>
-        </table>
-      </div>
+        <div class="table-wrap records-scroll-wrap">
+          <table class="records-table">
+            <thead>
+              <tr>
+                <th>Usuario</th><th>Documento de origen</th><th>Nombre</th><th>Cédula</th>
+                <th>N.º autorización</th><th>Práctica</th><th>Expedición</th><th>Vencimiento</th>
+                <th>Equipos asociados</th>
+              </tr>
+            </thead>
+            <tbody id="record-rows"></tbody>
+          </table>
+        </div>
+      </details>
+      <section class="license-records-section">
+        <h3>Licencias de operación por práctica</h3>
+        <p>Se muestran las licencias procesadas de entidades usuarias.</p>
+        <div class="notice" id="license-records-message" role="status"></div>
+        <div id="license-records-summary" class="records-summary" aria-label="Resumen de licencias"></div>
+        <details class="records-list-toggle">
+          <summary>Lista de licencias de entidades</summary>
+          <div id="license-records"></div>
+          <div class="pagination">
+            <span id="license-records-page-label"></span>
+            <div>
+              <button class="button secondary" id="license-records-prev" disabled>Licencias anteriores</button>
+              <button class="button secondary" id="license-records-next" disabled>Licencias siguientes</button>
+            </div>
+          </div>
+        </details>
+      </section>
     </section>
 
-    <section class="pane" id="pane-workbooks">
-      <div class="section-heading">
-        <div>
-          <h2>Editar Excel</h2>
-          <p>Se editan libros .xlsx de la carpeta configurada. Cada guardado crea una copia de respaldo local.</p>
-        </div>
-      </div>
-      <div class="workbook-controls">
-        <label>Libro
-          <select id="workbook-select"><option value="">Cargando…</option></select>
-        </label>
-        <button id="workbook-reveal" class="button secondary" disabled>Ver en carpeta</button>
-        <label>Hoja
-          <select id="sheet-select" disabled></select>
-        </label>
-        <button id="workbook-reload" class="button secondary" disabled>Recargar</button>
-        <button id="workbook-save" class="button primary" disabled>Guardar cambios</button>
-      </div>
-      <div class="notice" id="workbook-message" role="status"></div>
-      <div class="pagination">
-        <span id="workbook-page-label"></span>
-        <div>
-          <button class="button secondary" id="workbook-prev" disabled>Filas anteriores</button>
-          <button class="button secondary" id="workbook-next" disabled>Filas siguientes</button>
-        </div>
-      </div>
-      <div class="table-wrap workbook-wrap">
-        <table id="workbook-grid"></table>
-      </div>
-    </section>
   </main>
   <script type="module" src="/js/main.js"></script>
 </body>

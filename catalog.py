@@ -1,4 +1,5 @@
 import os
+from collections.abc import Callable, Iterator
 from datetime import datetime
 from pathlib import Path
 from uuid import uuid4
@@ -19,6 +20,46 @@ CATALOG_ROOTS = (
     ("documents", DOCUMENT_ROOT),
     ("entities", ENTITY_ROOT),
 )
+
+
+def iter_tree_files(
+    root: Path,
+    on_error: Callable[[OSError], None],
+    exclude: Path | None = None,
+) -> Iterator[os.DirEntry]:
+    """Recorre la carpeta como os.walk, pero reutiliza los datos de os.scandir.
+
+    En Windows, DirEntry trae tipo, tamaño y fechas en el mismo listado del
+    directorio, lo que evita una consulta extra por archivo en carpetas de red.
+    Omite carpetas ocultas, enlaces simbólicos y la carpeta excluida.
+    """
+    excluded = os.path.normcase(str(exclude)) if exclude is not None else None
+    pending = [str(root)]
+    while pending:
+        current = pending.pop()
+        try:
+            with os.scandir(current) as entries:
+                children = list(entries)
+        except OSError as error:
+            on_error(error)
+            continue
+        directories = []
+        for entry in children:
+            try:
+                if entry.is_symlink():
+                    continue
+                if entry.is_dir(follow_symlinks=False):
+                    if not entry.name.startswith(".") and (
+                        excluded is None
+                        or os.path.normcase(os.path.abspath(entry.path)) != excluded
+                    ):
+                        directories.append(entry.path)
+                    continue
+            except OSError as error:
+                on_error(error)
+                continue
+            yield entry
+        pending.extend(reversed(directories))
 
 
 def _update_state(**values: object) -> None:
@@ -81,50 +122,43 @@ def sync_file_catalog(
                 nonlocal root_errors
                 root_errors += 1
 
-            for current, directories, filenames in os.walk(root, onerror=on_walk_error):
-                directories[:] = [
-                    name for name in directories
-                    if not name.startswith(".") and not (Path(current) / name).is_symlink()
-                    and os.path.normcase(os.path.abspath(Path(current) / name))
-                    != os.path.normcase(str(APP_DATA))
-                ]
-                for filename in filenames:
-                    path = Path(current) / filename
-                    extension = path.suffix.lower()
-                    if extension not in ALLOWED_EXTENSIONS or path.is_symlink():
-                        continue
-                    try:
-                        stat = path.stat()
-                        relative = path.relative_to(root).as_posix()
-                    except OSError:
-                        root_errors += 1
-                        continue
-                    parts = Path(relative).parts
-                    owner = parts[0] if len(parts) > 1 else ""
-                    is_certificate = int(
-                        extension == ".pdf" and is_authorization_certificate(path)
+            for entry in iter_tree_files(root, on_walk_error, APP_DATA):
+                path = Path(entry.path)
+                extension = path.suffix.lower()
+                if extension not in ALLOWED_EXTENSIONS:
+                    continue
+                try:
+                    stat = entry.stat(follow_symlinks=False)
+                    relative = path.relative_to(root).as_posix()
+                except (OSError, ValueError):
+                    root_errors += 1
+                    continue
+                parts = Path(relative).parts
+                owner = parts[0] if len(parts) > 1 else ""
+                is_certificate = int(
+                    extension == ".pdf" and is_authorization_certificate(path)
+                )
+                batch.append((
+                    root_key,
+                    relative,
+                    path.name,
+                    extension,
+                    owner,
+                    stat.st_size,
+                    stat.st_mtime_ns,
+                    getattr(stat, "st_birthtime_ns", stat.st_ctime_ns),
+                    is_certificate,
+                    scan_id,
+                ))
+                processed += 1
+                if len(batch) >= BATCH_SIZE:
+                    _save_batch(connection, batch)
+                    batch.clear()
+                    _update_state(
+                        catalog_processed=processed,
+                        catalog_errors=errors + root_errors,
+                        catalog_message=f"Catalogando archivos: {processed} encontrados",
                     )
-                    batch.append((
-                        root_key,
-                        relative,
-                        path.name,
-                        extension,
-                        owner,
-                        stat.st_size,
-                        stat.st_mtime_ns,
-                        getattr(stat, "st_birthtime_ns", stat.st_ctime_ns),
-                        is_certificate,
-                        scan_id,
-                    ))
-                    processed += 1
-                    if len(batch) >= BATCH_SIZE:
-                        _save_batch(connection, batch)
-                        batch.clear()
-                        _update_state(
-                            catalog_processed=processed,
-                            catalog_errors=errors + root_errors,
-                            catalog_message=f"Catalogando archivos: {processed} encontrados",
-                        )
 
             if batch:
                 _save_batch(connection, batch)
@@ -166,6 +200,7 @@ def sync_file_catalog(
                 "catalog_total": processed,
                 "catalog_errors": errors,
                 "catalog_ready": INDEX_STATE["catalog_ready"] or documents_ready,
+                "catalog_generation": INDEX_STATE.get("catalog_generation", 0) + 1,
                 "catalog_message": (
                     "Catálogo actualizado"
                     if errors == 0 and documents_ready

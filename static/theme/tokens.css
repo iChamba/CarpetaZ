@@ -1,0 +1,26 @@
+:root {
+  color-scheme: light;
+  font-family: var(--font-family-base);
+  color: var(--color-text);
+  background: var(--color-background);
+
+  --font-family-base: "Segoe UI", Arial, sans-serif;
+  --font-family-monospace: Consolas, monospace;
+
+  --color-text: #172033;
+  --color-text-muted: #64748b;
+  --color-background: #f3f6fb;
+  --color-surface: #fff;
+  --color-brand: #173b69;
+  --color-primary: #1d4ed8;
+  --color-primary-hover: #1e40af;
+  --color-border: #dce3ed;
+  --color-focus: #3b82f6;
+  --color-danger: #b91c1c;
+  --color-danger-hover: #991b1b;
+  --color-success: #047857;
+
+  --radius-control: 6px;
+  --radius-card: 8px;
+  --layout-gutter: clamp(12px, 1vw, 18px);
+}

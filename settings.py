@@ -26,29 +26,24 @@ HOST = os.environ.get("HOST", "127.0.0.1")
 PORT = int(os.environ.get("PORT", "8765"))
 APP_USER = os.environ.get("APP_USER", "admin")
 APP_PASSWORD = os.environ.get("APP_PASSWORD", "")
-if HOST not in {"127.0.0.1", "localhost", "::1"} and not APP_PASSWORD:
-    raise SystemExit("Configura APP_PASSWORD antes de permitir conexiones desde otras PC.")
+SESSION_COOKIE_SECURE = os.environ.get("SESSION_COOKIE_SECURE", "0") == "1"
+
+
+class AppError(RuntimeError):
+    """Error cuyo mensaje está escrito para mostrarse al usuario."""
+
 
 ALLOWED_EXTENSIONS = {".pdf", ".docx", ".doc", ".jpg", ".jpeg", ".png", ".txt", ".xlsx"}
 MAX_REQUEST_BYTES = 2 * 1024 * 1024
-MAX_SEARCH_RESULTS = 500
 INDEX_LOCK = threading.Lock()
 INDEX_STATE_LOCK = threading.Lock()
-WORKBOOK_LOCK = threading.RLock()
 INDEX_STATE = {
-    "running": False,
-    "processed": 0,
-    "total": 0,
-    "indexed": 0,
-    "unchanged": 0,
-    "without_text": 0,
-    "errors": 0,
-    "error_details": [],
-    "message": "Índice pendiente",
     "catalog_running": False,
     "catalog_processed": 0,
     "catalog_total": 0,
     "catalog_errors": 0,
     "catalog_ready": False,
     "catalog_message": "Catálogo pendiente",
+    # Aumenta al terminar cada actualización del catálogo; invalida cachés derivadas.
+    "catalog_generation": 0,
 }

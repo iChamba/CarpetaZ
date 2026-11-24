@@ -95,6 +95,12 @@ def _normalized_practice(value: str) -> str:
 class UserRoutes:
     def list_users(self, params: dict[str, list[str]]) -> None:
         query = params.get("q", [""])[0].strip().casefold()
+        search_identity = params.get("search_identity", [""])[0] == "1"
+        identity_query = (
+            re.sub(r"[^0-9]", "", query)
+            if search_identity and re.fullmatch(r"[0-9.\-\s]+", query)
+            else ""
+        )
         authorization_filter = params.get("authorization", ["all"])[0]
         status_filter = params.get("status", [""])[0]
         practice_filter = _normalized_practice(params.get("practice", [""])[0])
@@ -158,8 +164,17 @@ class UserRoutes:
                     key=cmp_to_key(_compare_authorizations),
                 ),
             }
-            if query and query not in name.casefold():
+            matched_authorization = next(
+                (record for record in user["authorization_records"]
+                 if identity_query and identity_query in re.sub(
+                     r"[^0-9]", "", record["identity_number"]
+                 )),
+                None,
+            )
+            if query and query not in name.casefold() and not matched_authorization:
                 continue
+            if matched_authorization:
+                user["matched_authorization"] = matched_authorization
             if authorization_filter == "with" and not user["has_authorization"]:
                 continue
             if authorization_filter == "without" and user["has_authorization"]:

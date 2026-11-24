@@ -1,5 +1,6 @@
 import re
 import unicodedata
+from collections.abc import Callable
 from datetime import date
 from pathlib import Path
 
@@ -55,6 +56,39 @@ def extract_license_details(text: str) -> dict[str, str]:
         "issue_date": issue_date,
         "expiry_date": _numeric_date(*expiry.groups()) if expiry else "",
     }
+
+
+def extract_license_technical_tables(
+    tables: list[tuple[str, list[list[str | None]]]],
+) -> list[dict]:
+    result = []
+    for context, rows in tables:
+        clean_rows = [
+            ["\n".join(" ".join(line.split()) for line in (cell or "").splitlines()) for cell in row]
+            for row in rows
+            if any(cell and cell.strip() for cell in row)
+        ]
+        if not clean_rows:
+            continue
+        context_lines = [
+            line.replace("\x07", "").strip()
+            for line in context.splitlines() if line.replace("\x07", "").strip()
+        ]
+        heading = context_lines[-1] if context_lines else ""
+        header = _fold_header(" ".join([heading, *(
+            cell for row in clean_rows[:2] for cell in row
+        )]))
+        if re.search(r"\bfuentes?\b", header):
+            title = "Fuentes"
+        elif re.search(r"\bsistemas?\b", header):
+            title = "Sistemas"
+        elif re.search(r"\bequipos?\b", header):
+            title = "Equipos"
+        else:
+            continue
+        context_heading = heading if re.search(r"\b(?:equipos?|sistemas?|fuentes?)\b", heading, re.IGNORECASE) else ""
+        result.append({"title": title, "heading": context_heading, "rows": clean_rows})
+    return result
 
 
 def _value_after_label(lines: list[str], labels: list[str]) -> str:
@@ -338,11 +372,29 @@ def is_authorization_individual(text: str) -> bool:
     return bool(has_heading and has_certificate_data and not request_terms)
 
 
+def _pdf_text(document) -> str:
+    return "\n".join(page.get_text("text", sort=True) for page in document)
+
+
+def _certificate_fields_from_document(document, text: str) -> dict[str, str]:
+    equipment_rows: list[list[str | None]] = []
+    for page in document:
+        for table in page.find_tables().tables:
+            equipment_rows.extend(table.extract())
+    return extract_certificate_fields(text, equipment_rows)
+
+
 def extract_authorization_certificate(path: Path) -> dict[str, str]:
     with pymupdf.open(path) as document:
-        text = "\n".join(page.get_text("text", sort=True) for page in document)
-        equipment_rows: list[list[str | None]] = []
-        for page in document:
-            for table in page.find_tables().tables:
-                equipment_rows.extend(table.extract())
-    return extract_certificate_fields(text, equipment_rows)
+        return _certificate_fields_from_document(document, _pdf_text(document))
+
+
+def read_pdf_authorization(
+    path: Path, is_authorization: Callable[[str], bool],
+) -> tuple[str, dict[str, str] | None]:
+    """Lee el texto del PDF y, si es una autorización, extrae sus datos abriéndolo una sola vez."""
+    with pymupdf.open(path) as document:
+        text = _pdf_text(document)
+        if not text.strip() or not is_authorization(text):
+            return text, None
+        return text, _certificate_fields_from_document(document, text)
