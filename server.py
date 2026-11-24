@@ -13,11 +13,15 @@ from auth import (
     get_session_user,
     revoke_session,
 )
+from auto_refresh import start_auto_refresh
+from backup import backup_status, start_backup_scheduler
 from database import connect_db, initialize_db
 from documents import start_catalog
 from routes.documents import DocumentRoutes
 from routes.entities import EntityRoutes
 from routes.inspections import InspectionRoutes
+from routes.planning import PlanningRoutes
+from routes.entity_profiles import EntityProfileRoutes
 from routes.records import RecordRoutes
 from routes.users import UserRoutes
 from routes.workflows import WorkflowRoutes
@@ -26,6 +30,12 @@ from settings import (
     APP_DIR,
     AppError,
     APP_PASSWORD,
+    AUTO_REFRESH_MINUTES,
+    BACKUP_DIR,
+    BACKUP_INTERVAL_HOURS,
+    BACKUP_KEEP_DAILY,
+    BACKUP_KEEP_WEEKLY,
+    DATABASE,
     DOCUMENT_ROOT,
     HOST,
     INDEX_STATE,
@@ -183,11 +193,20 @@ class BaseRequestHandler(BaseHTTPRequestHandler):
             if parsed.path == "/api/status":
                 with INDEX_STATE_LOCK:
                     state = dict(INDEX_STATE)
+                state["backup"] = backup_status()
                 return self.send_json(state)
             if parsed.path == "/api/session":
                 return self.send_json({"user": self.current_user})
             if parsed.path == "/api/inspections":
                 return self.get_inspections()
+            if parsed.path == "/api/inspections/export":
+                return self.export_inspections()
+            if parsed.path == "/api/inspections/planning":
+                return self.get_inspection_planning()
+            if parsed.path == "/api/entity/record":
+                return self.get_entity_record(params)
+            if parsed.path == "/api/inspections/planning/export":
+                return self.export_inspection_planning(params)
             if parsed.path == "/api/workflow":
                 return self.get_workflow_data(params)
             if parsed.path == "/api/workflow/export":
@@ -246,6 +265,14 @@ class BaseRequestHandler(BaseHTTPRequestHandler):
                 return self.create_inspection(data)
             if parsed.path == "/api/inspections/action":
                 return self.act_on_inspection(data)
+            if parsed.path == "/api/entity/record":
+                return self.update_entity_record(data)
+            if parsed.path == "/api/entity/equipment":
+                return self.link_entity_equipment(data)
+            if parsed.path == "/api/inspections/planning/sync":
+                return self.sync_inspection_planning(data)
+            if parsed.path == "/api/inspections/planning/update":
+                return self.update_planning_item(data)
             if parsed.path == "/api/workflow/users":
                 return self.create_workflow_user(data)
             if parsed.path == "/api/workflow/groups":
@@ -308,6 +335,8 @@ class BaseRequestHandler(BaseHTTPRequestHandler):
 
 class RequestHandler(
     InspectionRoutes,
+    PlanningRoutes,
+    EntityProfileRoutes,
     WorkflowRoutes,
     DocumentRoutes,
     EntityRoutes,
@@ -353,7 +382,15 @@ def main() -> None:
     print(f"Carpeta de documentos: {DOCUMENT_ROOT}")
     print(f"Servidor: http://{HOST}:{PORT}")
     print("Cierra esta ventana para detener la aplicación.")
+    print(f"Respaldos automáticos: {BACKUP_DIR}")
+    if BACKUP_INTERVAL_HOURS > 0:
+        start_backup_scheduler(
+            DATABASE, BACKUP_DIR, BACKUP_INTERVAL_HOURS, BACKUP_KEEP_DAILY, BACKUP_KEEP_WEEKLY,
+        )
     start_catalog()
+    if AUTO_REFRESH_MINUTES > 0:
+        print(f"Actualización automática cada {AUTO_REFRESH_MINUTES:g} minutos.")
+        start_auto_refresh(AUTO_REFRESH_MINUTES)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

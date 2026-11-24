@@ -393,6 +393,9 @@ function renderEntityProfile(data) {
   ));
   heading.append(title);
   profile.append(heading);
+  const record = element("section", undefined, "entity-record");
+  profile.append(record);
+  loadEntityRecord(data.entity.name, record);
 
   const browser = element(
     "div",
@@ -830,4 +833,196 @@ async function refreshEntityImportStatus() {
     button.disabled = false;
     setMessage("entity-message", error.message, "error");
   }
+}
+
+// Ficha de la entidad (datos que se van juntando) y equipos con vencimientos.
+const recordFields = [
+  ["rut", "RUT", "text", 100], ["phone", "Teléfono", "tel", 100],
+  ["email", "Email", "email", 254], ["contact_details", "Datos de contacto", "text", 255],
+  ["address", "Domicilio", "text", 255], ["city", "Ciudad", "text", 160],
+  ["department", "Departamento", "text", 160],
+];
+const equipmentStatus = {
+  vencida: ["Vencida", "workflow-deadline-overdue"],
+  proxima: ["Próxima (90 días)", "workflow-deadline-warning"],
+  al_dia: ["Al día", "workflow-deadline-on-time"],
+  sin_fecha: ["Sin próxima fecha", "planning-status-none"],
+};
+let entityRecordRequest = 0;
+
+function recordDate(value) {
+  if (!value) return "—";
+  const [year, month, day] = value.split("-");
+  return `${day}/${month}/${year}`;
+}
+
+async function loadEntityRecord(name, container) {
+  const requestId = ++entityRecordRequest;
+  container.replaceChildren(element("p", "Cargando ficha y equipos…", "entity-file-status"));
+  try {
+    const data = await requestJson(`/api/entity/record?name=${encodeURIComponent(name)}`);
+    if (requestId === entityRecordRequest) renderEntityRecord(data, container);
+  } catch (error) {
+    if (requestId === entityRecordRequest) {
+      container.replaceChildren(element("p", `No se pudo cargar la ficha: ${error.message}`, "entity-file-status"));
+    }
+  }
+}
+
+async function postEntityRecord(url, payload, container, success) {
+  try {
+    const data = await requestJson(url, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
+    });
+    renderEntityRecord(data, container);
+    setMessage("entity-message", success, "success");
+  } catch (error) {
+    setMessage("entity-message", error.message, "error");
+    container.querySelectorAll("button").forEach(button => { button.disabled = false; });
+  }
+}
+
+function equipmentTable(items, data, container, mode) {
+  const table = element("table", undefined, "workflow-table entity-equipment-table");
+  const head = element("tr");
+  const headings = ["Institución en planilla", "Práctica / equipo", "Departamento", "Última inspección",
+    "Próxima inspección", "Estado", "Equipos", "Planilla"];
+  if (mode === "suggested" && data.can_link) headings.unshift("");
+  if (mode === "linked" && data.can_link) headings.push("");
+  for (const heading of headings) head.append(element("th", heading));
+  const thead = element("thead");
+  thead.append(head);
+  const body = element("tbody");
+  for (const item of items) {
+    const row = element("tr");
+    if (mode === "suggested" && data.can_link) {
+      const cell = element("td");
+      const box = document.createElement("input");
+      box.type = "checkbox";
+      box.checked = true;
+      box.value = String(item.id);
+      box.setAttribute("aria-label", `Asociar ${item.institution} · ${item.practice}`);
+      cell.append(box);
+      row.append(cell);
+    }
+    const [label, className] = equipmentStatus[item.status] || [item.status, "planning-status-none"];
+    const status = element("td");
+    status.append(element("span", label, `workflow-deadline-badge ${className}`));
+    row.append(element("td", item.institution), element("td", item.practice || "—"),
+      element("td", item.department || "—"), element("td", recordDate(item.last_inspection)),
+      element("td", recordDate(item.next_inspection)), status,
+      element("td", String(item.equipment_count)), element("td", item.categories.join(", ")));
+    if (mode === "linked" && data.can_link) {
+      const cell = element("td");
+      const remove = element("button", "Quitar", "button secondary small");
+      remove.type = "button";
+      remove.addEventListener("click", () => {
+        remove.disabled = true;
+        postEntityRecord("/api/entity/equipment",
+          { name: data.entity_name, item_ids: [item.id], action: "unlink" }, container, "Equipo desasociado.");
+      });
+      cell.append(remove);
+      row.append(cell);
+    }
+    body.append(row);
+  }
+  table.append(thead, body);
+  const wrap = element("div", undefined, "table-wrap");
+  wrap.append(table);
+  return wrap;
+}
+
+function renderEntityRecord(data, container) {
+  container.replaceChildren();
+  // Datos de la entidad.
+  const form = element("form", undefined, "workflow-form entity-record-form");
+  form.append(element("h4", "Datos de la entidad"));
+  for (const [field, label, type, max] of recordFields) {
+    const input = document.createElement("input");
+    input.name = field;
+    input.type = type;
+    input.maxLength = max;
+    input.value = data.profile[field] || "";
+    input.readOnly = !data.can_edit;
+    const wrapper = element("label", label);
+    wrapper.append(input);
+    form.append(wrapper);
+  }
+  const notes = document.createElement("textarea");
+  notes.name = "notes";
+  notes.maxLength = 2000;
+  notes.rows = 2;
+  notes.value = data.profile.notes || "";
+  notes.readOnly = !data.can_edit;
+  const notesLabel = element("label", "Notas", "entity-record-wide");
+  notesLabel.append(notes);
+  form.append(notesLabel);
+  form.append(element("p", data.can_edit
+    ? "Se completa sola con los datos de las inspecciones asociadas (solo los campos vacíos); lo que cargues acá no se reemplaza."
+    : "Solo Secretaría, Jefe de Inspección o un administrador pueden editar la ficha.", "form-help entity-record-wide"));
+  if (data.can_edit) {
+    const save = element("button", "Guardar ficha", "button workflow-approve");
+    save.type = "submit";
+    const actions = element("div", undefined, "entity-record-wide");
+    actions.append(save);
+    form.append(actions);
+    form.addEventListener("submit", event => {
+      event.preventDefault();
+      save.disabled = true;
+      postEntityRecord("/api/entity/record", {
+        name: data.entity_name, version: data.profile.version,
+        ...Object.fromEntries(new FormData(form)),
+      }, container, "Ficha guardada.");
+    });
+  }
+  if (data.events.length) {
+    const history = element("details", undefined, "entity-record-wide entity-record-history");
+    history.append(element("summary", `Historial de la ficha (${data.events.length})`));
+    const list = element("ol");
+    for (const event of data.events) {
+      const item = element("li");
+      item.append(element("strong", event.actor_name),
+        ` · ${event.action} · ${new Date(event.created_at).toLocaleString("es-UY")}` +
+        (event.details_text ? ` · ${event.details_text}` : ""));
+      list.append(item);
+    }
+    history.append(list);
+    form.append(history);
+  }
+  container.append(form);
+
+  // Equipos y vencimientos.
+  const equipment = element("section", undefined, "entity-record-equipment");
+  equipment.append(element("h4", `Equipos y vencimientos (${data.equipment.length})`));
+  if (data.equipment.length) {
+    equipment.append(equipmentTable(data.equipment, data, container, "linked"));
+  } else {
+    equipment.append(element("p", "Todavía no hay equipos de la planificación asociados a esta entidad.", "entity-file-status"));
+  }
+  if (data.suggested_equipment.length) {
+    const suggested = element("details", undefined, "entity-record-suggested");
+    suggested.open = !data.equipment.length;
+    suggested.append(element("summary",
+      `Posibles equipos de esta entidad según el nombre en las planillas (${data.suggested_equipment.length})`));
+    suggested.append(equipmentTable(data.suggested_equipment, data, container, "suggested"));
+    if (data.can_link) {
+      const link = element("button", "Asociar seleccionados", "button workflow-approve small");
+      link.type = "button";
+      link.addEventListener("click", () => {
+        const ids = [...suggested.querySelectorAll('input[type="checkbox"]:checked')].map(box => Number(box.value));
+        if (!ids.length) {
+          setMessage("entity-message", "Marca al menos un equipo para asociar.", "error");
+          return;
+        }
+        link.disabled = true;
+        postEntityRecord("/api/entity/equipment", { name: data.entity_name, item_ids: ids, action: "link" },
+          container, `${ids.length} equipo(s) asociados.`);
+      });
+      suggested.append(link);
+    } else {
+      suggested.append(element("p", "Solo Jefe de Inspección o un administrador pueden asociar equipos.", "form-help"));
+    }
+    equipment.append(suggested);
+  }
+  container.append(equipment);
 }

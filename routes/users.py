@@ -120,7 +120,10 @@ class UserRoutes:
                 "SELECT id, source_path, first_name, last_name, identity_number, "
                 "authorization_number, practice, issue_date, expiry_date, equipment, "
                 "is_authorization_certificate "
-                "FROM extracted_records"
+                "FROM extracted_records "
+                # Los datos de archivos que ya no están en la carpeta no se muestran
+                # (se conservan en la base por si el archivo vuelve).
+                "WHERE source_path IN (SELECT path FROM file_catalog WHERE root = 'documents')"
             ).fetchall()
         finally:
             connection.close()

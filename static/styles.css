@@ -112,6 +112,45 @@ main { width: 100%; margin: 0; padding: 24px var(--layout-gutter) 48px; }
 .workflow-case-tab:hover { background: #dbeafe; }
 .workflow-case-tab[aria-pressed="true"] { border-color: #1d4ed8; color: #fff; background: #1d4ed8; }
 .workflow-table { min-width: 720px; }
+.inspection-planning-filters { flex-wrap: wrap; align-items: flex-end; margin: 8px 0; }
+.inspection-planning-filters label { display: flex; flex-direction: column; gap: 4px; font-size: .88rem; color: #475569; }
+.planning-editor { grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); margin: 10px 0; padding: 12px; border: 1px solid #cbd5e1; border-radius: 8px; background: #f8fafc; }
+.planning-editor h4, .planning-editor-notes, .planning-editor-actions, .planning-editor-history, #planning-editor-sheet { grid-column: 1 / -1; }
+.planning-editor-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.planning-editor-history { margin: 0; padding-left: 20px; font-size: .88rem; color: #475569; }
+.planning-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.planning-flag { display: block; margin-top: 3px; color: #854d0e; font-size: .8rem; font-weight: 650; }
+.planning-month-picker { margin: 8px 0; padding: 10px 12px; border: 1px solid #cbd5e1; border-radius: 8px; background: #fff; }
+.planning-month-header { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 10px; margin-bottom: 8px; }
+.planning-month-header #planning-month-title { font-size: 1.05rem; }
+.planning-month-selected { color: #1d4ed8; font-weight: 650; }
+.planning-month-nav { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 14px; margin-bottom: 8px; }
+.planning-month-nav #planning-year { min-width: 220px; text-align: center; font-size: 1.15rem; }
+.planning-year-button { min-width: 150px; justify-content: center; font-weight: 650; }
+.planning-month-shortcuts { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; margin-bottom: 10px; }
+.planning-month-help { text-align: center; }
+.planning-month-grid { display: grid; grid-template-columns: repeat(6, minmax(90px, 1fr)); gap: 6px; }
+.planning-month { display: grid; gap: 2px; padding: 8px 6px; border: 1px solid #aebed0; border-radius: 6px; background: #f8fafc; color: #243248; cursor: pointer; text-align: center; }
+.planning-month:hover { background: #dbeafe; }
+.planning-month strong { font-size: 1.15rem; }
+.planning-month small { font-size: .78rem; text-transform: capitalize; }
+.planning-month.empty { color: #94a3b8; }
+.planning-month.past:not(.empty) { border-color: #f87171; background: #fee2e2; color: #991b1b; }
+.planning-month.current { box-shadow: inset 0 0 0 2px #2563eb; }
+.planning-month[aria-pressed="true"] { border-color: #1d4ed8; background: #1d4ed8; color: #fff; }
+@media (max-width: 700px) { .planning-month-grid { grid-template-columns: repeat(3, 1fr); } }
+.inspection-row-title { max-width: 260px; white-space: normal; text-align: left; }
+.inspection-row-case { display: block; margin-top: 3px; color: #64748b; font-size: .78rem; }
+.entity-record { display: grid; gap: 14px; margin: 10px 0 16px; }
+.entity-record-form { grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); padding: 12px; border: 1px solid #cbd5e1; border-radius: 8px; background: #f8fafc; }
+.entity-record-form h4, .entity-record-wide { grid-column: 1 / -1; margin: 0; }
+.entity-record-history ol { margin: 6px 0 0; padding-left: 20px; font-size: .86rem; color: #475569; }
+.entity-record-equipment { padding: 12px; border: 1px solid #cbd5e1; border-radius: 8px; }
+.entity-record-equipment h4 { margin: 0 0 8px; }
+.entity-record-suggested { margin-top: 10px; }
+.entity-record-suggested summary { cursor: pointer; font-weight: 650; color: #1d4ed8; margin-bottom: 8px; }
+.entity-equipment-table { min-width: 760px; }
+.planning-status-none { color: #475569; border-color: #cbd5e1; background: #f1f5f9; }
 .workflow-case-row { cursor: pointer; }
 .workflow-case-row:hover, .workflow-case-row.selected { background: #eff6ff; }
 .workflow-case-empty { color: #64748b; font-style: italic; }

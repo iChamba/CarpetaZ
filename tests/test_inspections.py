@@ -1,7 +1,11 @@
 import os
+import sqlite3
 import tempfile
 import unittest
+from io import BytesIO
 from pathlib import Path
+
+from openpyxl import load_workbook
 
 _ENV_ROOT = tempfile.TemporaryDirectory(prefix="carpetaz-inspections-env-")
 os.environ.setdefault("DOCUMENT_ROOT", _ENV_ROOT.name)
@@ -16,6 +20,16 @@ class Handler(InspectionRoutes, WorkflowRoutes):
     def __init__(self, user):
         self.current_user = user
         self.response = None
+        self.wfile = BytesIO()
+
+    def send_response(self, status):
+        self.response = status, None
+
+    def send_header(self, name, value):
+        pass
+
+    def end_headers(self):
+        pass
 
     def send_json(self, payload, status=200):
         self.response = status, payload
@@ -171,6 +185,188 @@ class InspectionTests(unittest.TestCase):
         })
         self.assertEqual(handler.response[0], 201)
         self.assertEqual(handler.response[1]["workflow_role"], "jefe_inspeccion")
+
+    def run_full_flow(self):
+        inspection_id = self.create()
+        self.act("chief", inspection_id, 0, "assign", inspector_id=self.users["inspector"]["id"])
+        self.act("inspector", inspection_id, 1, "complete_pre", checklist=[True] * 3 + [False] * 3,
+                 scheduled_date="2026-12-01", scheduled_time="10:00", scheduled_place="Sala 1")
+        self.act("inspector", inspection_id, 2, "complete_post", checklist=[False] * 6)
+        self.act("chief", inspection_id, 3, "return_post", comment="Revisar")
+        self.act("inspector", inspection_id, 4, "complete_post", checklist=[True] * 6)
+        return inspection_id
+
+    def test_history_records_what_changed_and_stages(self):
+        inspection_id = self.run_full_flow()
+        events = self.data("chief")["inspections"][0]["events"]
+        self.assertIn("Número de trámite: 00012", events[0]["details_text"])
+        self.assertEqual(events[1]["details_text"], "Inspector líder: (vacío) → inspector")
+        self.assertIn("Fecha de inspección: (vacío) → 2026-12-01", events[2]["details_text"])
+        self.assertIn("Checklist previo: (vacío) → 3 de 6 casillas marcadas", events[2]["details_text"])
+        self.assertIn("0 de 6 casillas marcadas → 6 de 6 casillas marcadas", events[5]["details_text"])
+        connection = database.connect_db()
+        try:
+            rows = connection.execute(
+                "SELECT action, from_stage, to_stage FROM inspection_events "
+                "WHERE inspection_id = ? ORDER BY id", (inspection_id,),
+            ).fetchall()
+            updated_at = connection.execute(
+                "SELECT updated_at FROM inspections WHERE id = ?", (inspection_id,)
+            ).fetchone()[0]
+        finally:
+            connection.close()
+        self.assertEqual(tuple(rows[4]), ("return_post", "chief_review", "post_inspection"))
+        self.assertTrue(updated_at)
+
+    def test_existing_history_is_kept_when_upgrading(self):
+        legacy = Path(self.root.name) / "legacy.sqlite3"
+        connection = sqlite3.connect(legacy)
+        try:
+            connection.execute(
+                "CREATE TABLE inspection_events (id INTEGER PRIMARY KEY, inspection_id INTEGER NOT NULL, "
+                "actor_id INTEGER NOT NULL, action TEXT NOT NULL, comment TEXT NOT NULL DEFAULT '', "
+                "created_at TEXT NOT NULL)"
+            )
+            connection.execute(
+                "INSERT INTO inspection_events (inspection_id, actor_id, action, comment, created_at) "
+                "VALUES (1, 1, 'approve', 'Antiguo', '2026-01-01')"
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        database.DATABASE = legacy
+        database.initialize_db()
+        connection = database.connect_db()
+        try:
+            row = connection.execute("SELECT action, comment, details FROM inspection_events").fetchone()
+        finally:
+            connection.close()
+        self.assertEqual(tuple(row), ("approve", "Antiguo", "{}"))
+
+    def export(self, user):
+        handler = Handler(self.users[user])
+        handler.export_inspections()
+        return load_workbook(BytesIO(handler.wfile.getvalue()))
+
+    def test_export_contains_inspections_and_history_as_text(self):
+        handler = Handler(self.users["secretary"])
+        handler.create_inspection({"case_number": "=1+1", "company_name": '=HYPERLINK("x")'})
+        self.run_full_flow()
+        workbook = self.export("chief")
+        try:
+            sheet = workbook["Inspecciones"]
+            headings = [cell.value for cell in sheet[1]]
+            self.assertIn("Número de trámite", headings)
+            self.assertEqual(sheet.max_row, 3)
+            case_column = headings.index("Número de trámite") + 1
+            formula_cell = sheet.cell(row=2, column=case_column)
+            self.assertEqual(formula_cell.value, "=1+1")
+            self.assertEqual(formula_cell.data_type, "s")
+            second = {heading: sheet.cell(row=3, column=index).value
+                      for index, heading in enumerate(headings, start=1)}
+            self.assertEqual(second["Inspector líder"], "inspector")
+            self.assertEqual(second["Etapa"], "Revisión de Jefe de Inspección")
+            self.assertEqual(second["Checklist posterior"], "6 de 6 casillas marcadas")
+            history = workbook["Historial"]
+            self.assertEqual(history.max_row, 1 + 1 + 6)
+            for row in history.iter_rows():
+                for cell in row:
+                    self.assertNotEqual(cell.data_type, "f")
+            actions = [history.cell(row=index, column=4).value for index in range(2, history.max_row + 1)]
+            self.assertIn("Devuelto para corrección", actions)
+        finally:
+            workbook.close()
+
+    def test_inspector_exports_only_assigned_inspections(self):
+        self.create()
+        self.run_full_flow()
+        workbook = self.export("inspector")
+        try:
+            self.assertEqual(workbook["Inspecciones"].max_row, 2)
+        finally:
+            workbook.close()
+        workbook = self.export("other")
+        try:
+            self.assertEqual(workbook["Inspecciones"].max_row, 1)
+            self.assertEqual(workbook["Historial"].max_row, 1)
+        finally:
+            workbook.close()
+
+    def test_chief_assigns_lead_and_second_inspector_when_creating(self):
+        handler = Handler(self.users["chief"])
+        with self.assertRaisesRegex(ValueError, "inspector líder"):
+            handler.create_inspection({"case_number": "1"})
+        with self.assertRaisesRegex(ValueError, "distinto"):
+            handler.create_inspection({
+                "inspector_id": self.users["inspector"]["id"],
+                "second_inspector_id": self.users["inspector"]["id"],
+            })
+        with self.assertRaisesRegex(ValueError, "segundo inspector activo"):
+            handler.create_inspection({
+                "inspector_id": self.users["inspector"]["id"],
+                "second_inspector_id": self.users["lawyer"]["id"],
+            })
+        handler.create_inspection({
+            "case_number": "77", "inspector_id": self.users["inspector"]["id"],
+            "second_inspector_id": self.users["other"]["id"],
+        })
+        self.assertEqual(handler.response[0], 201)
+        self.assertEqual(handler.response[1]["stage"], "pre_inspection")
+        inspection = self.data("chief")["inspections"][0]
+        self.assertEqual(inspection["inspector_name"], "inspector")
+        self.assertEqual(inspection["second_inspector_name"], "other")
+        self.assertEqual(inspection["version"], 1)
+        self.assertEqual([event["action"] for event in inspection["events"]], ["created", "assign"])
+        self.assertIn("Segundo inspector: (vacío) → other", inspection["events"][1]["details_text"])
+        # El líder continúa el flujo normal con la versión que recibió.
+        self.assertEqual(self.act("inspector", inspection["id"], 1, "complete_pre",
+                                  checklist=[True] * 6, scheduled_date="2026-12-02",
+                                  scheduled_time="11:00", scheduled_place="Hospital")[0], 200)
+
+    def test_only_chief_assigns_when_creating(self):
+        handler = Handler(self.users["secretary"])
+        handler.create_inspection({"inspector_id": self.users["inspector"]["id"]})
+        self.assertEqual(handler.response[0], 403)
+        handler.create_inspection({"case_number": "sin asignar"})
+        self.assertEqual(handler.response[1]["stage"], "assignment")
+
+    def test_second_inspector_sees_schedule_but_cannot_act(self):
+        inspection_id = self.create()
+        self.assertEqual(self.act("chief", inspection_id, 0, "assign",
+                                  inspector_id=self.users["inspector"]["id"],
+                                  second_inspector_id=self.users["other"]["id"])[0], 200)
+        self.act("inspector", inspection_id, 1, "complete_pre", checklist=[False] * 6,
+                 scheduled_date="2026-12-03", scheduled_time="08:00", scheduled_place="Clínica")
+        seen = self.data("other")["inspections"]
+        self.assertEqual([item["id"] for item in seen], [inspection_id])
+        self.assertEqual(seen[0]["scheduled_date"], "2026-12-03")
+        self.assertTrue(seen[0]["events"])
+        self.assertEqual(self.act("other", inspection_id, 2, "complete_post", checklist=[True] * 6)[0], 403)
+        self.assertEqual(self.act("other", inspection_id, 2, "set_second",
+                                  second_inspector_id=None)[0], 403)
+        workbook = self.export("other")
+        try:
+            sheet = workbook["Inspecciones"]
+            headings = [cell.value for cell in sheet[1]]
+            self.assertEqual(sheet.max_row, 2)
+            self.assertEqual(sheet.cell(row=2, column=headings.index("Segundo inspector") + 1).value, "other")
+        finally:
+            workbook.close()
+
+    def test_chief_changes_or_removes_second_inspector_without_moving_stage(self):
+        inspection_id = self.create()
+        self.act("chief", inspection_id, 0, "assign", inspector_id=self.users["inspector"]["id"])
+        self.assertEqual(self.act("chief", inspection_id, 1, "set_second",
+                                  second_inspector_id=self.users["other"]["id"])[0], 200)
+        with self.assertRaisesRegex(ValueError, "distinto"):
+            self.act("chief", inspection_id, 2, "set_second",
+                     second_inspector_id=self.users["inspector"]["id"])
+        self.assertEqual(self.act("chief", inspection_id, 2, "set_second", second_inspector_id=None)[0], 200)
+        inspection = self.data("chief")["inspections"][0]
+        self.assertEqual(inspection["stage"], "pre_inspection")
+        self.assertIsNone(inspection["second_inspector_id"])
+        self.assertEqual(self.data("other")["inspections"], [])
+        self.assertEqual(inspection["events"][-1]["details_text"], "Segundo inspector: other → (vacío)")
 
 
 if __name__ == "__main__":

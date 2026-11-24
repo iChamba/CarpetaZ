@@ -365,13 +365,32 @@ def _authorization_folders(area_folder: Path) -> list[Path]:
         return []
 
 
-def _entity_import_worker() -> None:
+def _entity_import_worker(incremental: bool = False) -> None:
     # Una sola instancia de Word para todos los .doc de la revisión.
     with word_session():
-        _run_entity_import()
+        _run_entity_import(incremental)
 
 
-def _run_entity_import() -> None:
+def _license_is_current(relative: str, path: Path) -> bool:
+    """True si la licencia ya se procesó (con tablas) después de la última modificación."""
+    connection = connect_db()
+    try:
+        row = connection.execute(
+            "SELECT created_at, technical_tables FROM entity_licenses WHERE source_path = ?",
+            (relative,),
+        ).fetchone()
+    finally:
+        connection.close()
+    if row is None or row["technical_tables"] is None:
+        return False
+    try:
+        processed_at = datetime.fromisoformat(row["created_at"])
+    except ValueError:
+        return False
+    return datetime.fromtimestamp(path.stat().st_mtime) < processed_at
+
+
+def _run_entity_import(incremental: bool = False) -> None:
     try:
         files: list[Path] = []
         errors: list[str] = []
@@ -400,6 +419,7 @@ def _run_entity_import() -> None:
                 "updated": 0,
                 "without_text": 0,
                 "without_license": 0,
+                "unchanged": 0,
                 "errors": len(errors),
                 "error_details": errors[:20],
                 "message": "Buscando licencias de operación",
@@ -409,6 +429,10 @@ def _run_entity_import() -> None:
             relative = path.relative_to(ENTITY_ROOT).as_posix()
             try:
                 safe_path, relative = safe_relative_path(relative, ENTITY_ROOT)
+                if incremental and _license_is_current(relative, safe_path):
+                    with ENTITY_IMPORT_STATE_LOCK:
+                        ENTITY_IMPORT_STATE["unchanged"] += 1
+                    continue
                 text, technical_tables = _extract_license_content(safe_path)
                 if not text.strip():
                     with ENTITY_IMPORT_STATE_LOCK:
@@ -451,6 +475,35 @@ def _run_entity_import() -> None:
         with ENTITY_IMPORT_STATE_LOCK:
             ENTITY_IMPORT_STATE["running"] = False
         ENTITY_IMPORT_LOCK.release()
+
+
+def _reset_entity_import_state() -> None:
+    with ENTITY_IMPORT_STATE_LOCK:
+        ENTITY_IMPORT_STATE.update({
+            "has_run": True,
+            "running": True,
+            "total": 0,
+            "processed": 0,
+            "imported": 0,
+            "updated": 0,
+            "without_text": 0,
+            "without_license": 0,
+            "unchanged": 0,
+            "errors": 0,
+            "error_details": [],
+            "message": "Preparando revisión de licencias",
+        })
+
+
+def run_entity_import_now(incremental: bool = True) -> bool:
+    """Ejecuta la revisión de licencias en el hilo actual. Con incremental, omite
+    las licencias que no cambiaron desde que se procesaron. Devuelve False si no
+    se ejecutó (ya hay una en curso o no existe la carpeta)."""
+    if not ENTITY_ROOT.is_dir() or not ENTITY_IMPORT_LOCK.acquire(blocking=False):
+        return False
+    _reset_entity_import_state()
+    _entity_import_worker(incremental)  # Libera el bloqueo al terminar.
+    return True
 
 
 class EntityRoutes:
@@ -909,20 +962,7 @@ class EntityRoutes:
             raise FileNotFoundError("No se encontró la carpeta de entidades usuarias.")
         if not ENTITY_IMPORT_LOCK.acquire(blocking=False):
             return self.send_error_json("La revisión de licencias ya está en curso.", 409)
-        with ENTITY_IMPORT_STATE_LOCK:
-            ENTITY_IMPORT_STATE.update({
-                "has_run": True,
-                "running": True,
-                "total": 0,
-                "processed": 0,
-                "imported": 0,
-                "updated": 0,
-                "without_text": 0,
-                "without_license": 0,
-                "errors": 0,
-                "error_details": [],
-                "message": "Preparando revisión de licencias",
-            })
+        _reset_entity_import_state()
         try:
             threading.Thread(target=_entity_import_worker, daemon=True).start()
         except Exception:

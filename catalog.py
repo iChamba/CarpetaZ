@@ -1,3 +1,4 @@
+import logging
 import os
 from collections.abc import Callable, Iterator
 from datetime import datetime
@@ -117,10 +118,23 @@ def sync_file_catalog(
             scan_id = uuid4().hex
             batch: list[tuple[str, str, str, str, str, int, int, int, int, str]] = []
             root_errors = 0
+            # Rutas (relativas) que no se pudieron leer: lo catalogado bajo ellas
+            # se conserva, porque no se puede saber si los archivos siguen ahí.
+            unreadable: set[str] = set()
 
-            def on_walk_error(_error: OSError) -> None:
+            def mark_unreadable(location: object, error: OSError) -> None:
                 nonlocal root_errors
                 root_errors += 1
+                try:
+                    relative_location = Path(os.fsdecode(location)).relative_to(root).as_posix()
+                except (TypeError, ValueError):
+                    relative_location = ""
+                unreadable.add("" if relative_location == "." else relative_location)
+                if root_errors <= 20:
+                    logging.warning("Catálogo: no se pudo leer %s: %s", location, error)
+
+            def on_walk_error(error: OSError) -> None:
+                mark_unreadable(error.filename, error)
 
             for entry in iter_tree_files(root, on_walk_error, APP_DATA):
                 path = Path(entry.path)
@@ -130,8 +144,8 @@ def sync_file_catalog(
                 try:
                     stat = entry.stat(follow_symlinks=False)
                     relative = path.relative_to(root).as_posix()
-                except (OSError, ValueError):
-                    root_errors += 1
+                except (OSError, ValueError) as error:
+                    mark_unreadable(entry.path, error)
                     continue
                 parts = Path(relative).parts
                 owner = parts[0] if len(parts) > 1 else ""
@@ -180,7 +194,10 @@ def sync_file_catalog(
                 if root_key == "documents":
                     documents_ready = True
             else:
+                _remove_missing(connection, root_key, scan_id, unreadable)
                 connection.commit()
+                if root_key == "documents":
+                    documents_ready = True
                 _update_state(
                     catalog_message=(
                         f"Catálogo parcial: {root_errors} ubicación(es) inaccesibles"
@@ -200,6 +217,7 @@ def sync_file_catalog(
                 "catalog_total": processed,
                 "catalog_errors": errors,
                 "catalog_ready": INDEX_STATE["catalog_ready"] or documents_ready,
+                "catalog_last_finished": datetime.now().isoformat(timespec="seconds"),
                 "catalog_generation": INDEX_STATE.get("catalog_generation", 0) + 1,
                 "catalog_message": (
                     "Catálogo actualizado"
@@ -207,6 +225,23 @@ def sync_file_catalog(
                     else INDEX_STATE["catalog_message"]
                 ),
             })
+
+
+def _remove_missing(connection, root_key: str, scan_id: str, unreadable: set[str]) -> None:
+    """Borra del catálogo lo que no apareció en este recorrido, salvo lo que está
+    dentro de una ubicación que no se pudo leer."""
+    if "" in unreadable:
+        return
+    prefixes = tuple(location + "/" for location in unreadable)
+    missing = [
+        (root_key, path)
+        for (path,) in connection.execute(
+            "SELECT path FROM file_catalog WHERE root = ? AND scan_id != ?",
+            (root_key, scan_id),
+        ).fetchall()
+        if path not in unreadable and not path.startswith(prefixes)
+    ]
+    connection.executemany("DELETE FROM file_catalog WHERE root = ? AND path = ?", missing)
 
 
 def _save_batch(connection, rows: list[tuple]) -> None:

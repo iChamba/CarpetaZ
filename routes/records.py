@@ -300,6 +300,32 @@ def _run_certificate_import() -> None:
         CERTIFICATE_IMPORT_LOCK.release()
 
 
+def _reset_certificate_import_state() -> None:
+    with CERTIFICATE_IMPORT_STATE_LOCK:
+        CERTIFICATE_IMPORT_STATE.update({
+            "has_run": True,
+            "running": True,
+            "total": 0,
+            "processed": 0,
+            "imported": 0,
+            "updated": 0,
+            "unchanged": 0,
+            "without_text": 0,
+            "errors": 0,
+            "error_details": [],
+            "message": "Buscando documentos para revisar",
+        })
+
+
+def run_certificate_import_now() -> bool:
+    """Ejecuta la revisión en el hilo actual. Devuelve False si ya hay una en curso."""
+    if not CERTIFICATE_IMPORT_LOCK.acquire(blocking=False):
+        return False
+    _reset_certificate_import_state()
+    _certificate_import_worker()  # Libera el bloqueo al terminar.
+    return True
+
+
 class RecordRoutes:
     def extract_record(self, data: dict) -> None:
         path, relative = safe_relative_path(str(data.get("path", "")))
@@ -343,20 +369,7 @@ class RecordRoutes:
     def start_certificate_import(self) -> None:
         if not CERTIFICATE_IMPORT_LOCK.acquire(blocking=False):
             return self.send_error_json("La importación masiva ya está en curso.", 409)
-        with CERTIFICATE_IMPORT_STATE_LOCK:
-            CERTIFICATE_IMPORT_STATE.update({
-                "has_run": True,
-                "running": True,
-                "total": 0,
-                "processed": 0,
-                "imported": 0,
-                "updated": 0,
-                "unchanged": 0,
-                "without_text": 0,
-                "errors": 0,
-                "error_details": [],
-                "message": "Buscando documentos para revisar",
-            })
+        _reset_certificate_import_state()
         try:
             threading.Thread(target=_certificate_import_worker, daemon=True).start()
         except Exception:

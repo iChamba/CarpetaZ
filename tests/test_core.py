@@ -598,6 +598,8 @@ class UserRoutesTests(unittest.TestCase):
         self.assertEqual(authorization_record["expiry_date"], "01/01/2027")
 
     def test_user_list_can_search_extracted_identity_for_workflow(self):
+        (self.user_folder / "2025" / "nuevo.pdf").write_bytes(b"test")
+        sync_file_catalog((("documents", Path(TEMP_ROOT.name)),))
         connection = connect_db()
         try:
             connection.execute(

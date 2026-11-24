@@ -35,8 +35,14 @@
     <section class="pane" id="pane-inspections">
       <div class="section-heading">
         <div><h2>Mis Inspecciones</h2><p>Consulta las inspecciones y su calendario.</p></div>
+        <a class="button secondary small" id="inspection-export" href="/api/inspections/export">Exportar inspecciones e historial (.xlsx)</a>
       </div>
       <div class="notice" id="inspection-message" role="status"></div>
+      <div class="workflow-case-tabs hidden" id="inspection-subtabs" role="group" aria-label="Secciones de inspecciones">
+        <button type="button" class="workflow-case-tab" data-inspection-view="list" aria-pressed="true">Inspecciones</button>
+        <button type="button" class="workflow-case-tab" data-inspection-view="planning" aria-pressed="false">Planificación de inspección</button>
+      </div>
+      <div id="inspection-main">
       <details class="workflow-create-panel hidden" id="inspection-create-panel">
         <summary>Nueva Inspección</summary>
         <form id="inspection-form" class="workflow-form">
@@ -57,8 +63,12 @@
           <label>Domicilio<input name="address" maxlength="255"></label>
           <label>Ciudad<input name="city" maxlength="160"></label>
           <label>Email<input name="email" type="email" maxlength="254"></label>
+          <label>Entidad usuaria (opcional)<input name="entity_name" list="inspection-entity-options" maxlength="255" placeholder="Escribe para buscar la entidad" autocomplete="off" data-entity-input></label>
+          <input type="hidden" name="planning_item_id" id="inspection-planning-item">
+          <label class="hidden" id="inspection-lead-field">Inspector líder<select name="inspector_id" id="inspection-lead-select"></select></label>
+          <label class="hidden" id="inspection-second-field">Segundo inspector (opcional)<select name="second_inspector_id" id="inspection-second-select"></select></label>
           <button type="submit" class="button workflow-approve">Crear inspección</button>
-          <p class="form-help">Los datos son opcionales. Jefe de Inspección asignará al inspector.</p>
+          <p class="form-help" id="inspection-create-help">Los datos son opcionales. Jefe de Inspección asignará al inspector.</p>
         </form>
       </details>
       <div class="inspection-layout">
@@ -67,7 +77,7 @@
             <h3>Inspecciones</h3>
             <div class="table-wrap">
               <table class="workflow-table">
-                <thead><tr><th>Número de trámite</th><th>Institución o empresa</th><th>Inspector líder</th><th>Etapa</th></tr></thead>
+                <thead><tr><th>Institución</th><th>Tipo de solicitud</th><th>Práctica</th><th>Inspector líder</th><th>Segundo inspector</th><th>Etapa</th></tr></thead>
                 <tbody id="inspection-rows"></tbody>
               </table>
             </div>
@@ -88,6 +98,81 @@
         </div>
         <section id="inspection-detail" class="workflow-detail empty-state" aria-live="polite">Selecciona una inspección para ver sus datos.</section>
       </div>
+      </div>
+      <datalist id="inspection-entity-options"></datalist>
+      <section id="inspection-planning" class="inspection-planning hidden" aria-labelledby="inspection-planning-title">
+        <h3 id="inspection-planning-title">Planificación de inspección</h3>
+        <p class="form-help">Datos de las planillas de la carpeta «5 Registro de tramites y planillas» (todas menos las de observaciones), agrupados por institución y práctica y guardados en la base. Las correcciones se guardan en la base y no modifican los Excel; al volver a leer las planillas se actualizan sus datos, pero las correcciones y notas se conservan.</p>
+        <form id="inspection-planning-filter" class="inline-form inspection-planning-filters">
+          <input id="planning-query" type="search" placeholder="Buscar institución, práctica o departamento" aria-label="Buscar en la planificación">
+          <label>Estado
+            <select id="planning-status">
+              <option value="">Todos</option>
+              <option value="vencida">Vencidas</option>
+              <option value="proxima">Próximos 90 días</option>
+              <option value="al_dia">Al día</option>
+              <option value="sin_fecha">Sin próxima fecha</option>
+            </select>
+          </label>
+          <label>Planilla<select id="planning-category"><option value="">Todas</option></select></label>
+          <label>Ordenar por
+            <select id="planning-sort">
+              <option value="next">Próxima inspección</option>
+              <option value="last">Última inspección</option>
+              <option value="institution">Institución</option>
+              <option value="practice">Práctica</option>
+            </select>
+          </label>
+          <button type="button" class="button secondary small" id="planning-reload">Volver a leer planillas</button>
+          <a class="button secondary small" id="planning-export" href="/api/inspections/planning/export">Exportar a Excel (.xlsx)</a>
+        </form>
+        <section class="planning-month-picker" aria-labelledby="planning-month-title">
+          <input type="hidden" id="planning-month" value="">
+          <div class="planning-month-header">
+            <strong id="planning-month-title">Vencen en</strong>
+            <span class="planning-month-selected" id="planning-month-selected"></span>
+            <button type="button" class="button secondary small" id="planning-calendar-toggle" aria-expanded="true" aria-controls="planning-calendar-body">Ocultar calendario</button>
+          </div>
+          <div id="planning-calendar-body">
+            <div class="planning-month-nav">
+              <button type="button" class="button primary planning-year-button" id="planning-year-prev">‹ Año anterior</button>
+              <strong id="planning-year" aria-live="polite"></strong>
+              <button type="button" class="button primary planning-year-button" id="planning-year-next">Año siguiente ›</button>
+            </div>
+            <div class="planning-month-shortcuts">
+              <button type="button" class="button secondary small" id="planning-month-this">Este mes</button>
+              <button type="button" class="button secondary small" id="planning-month-next">Mes siguiente</button>
+              <button type="button" class="button secondary small" id="planning-month-clear">Cualquier mes</button>
+            </div>
+            <div class="planning-month-grid" id="planning-month-grid" role="group" aria-label="Meses de vencimiento"></div>
+            <p class="form-help planning-month-help">Cada mes muestra cuántas inspecciones vencen. Los meses ya pasados (en rojo) son las vencidas; usa «Año anterior» para ver años anteriores.</p>
+          </div>
+        </section>
+        <p class="form-help" id="planning-summary" aria-live="polite"></p>
+        <form id="planning-editor" class="workflow-form planning-editor hidden">
+          <h4 id="planning-editor-title">Corregir datos</h4>
+          <label>Institución<input name="institution" maxlength="255" required></label>
+          <label>Práctica<input name="practice" maxlength="160"></label>
+          <label>Departamento<input name="department" maxlength="160"></label>
+          <label>Última inspección<input name="last_inspection" type="date"></label>
+          <label>Próxima inspección<input name="next_inspection" type="date"></label>
+          <label>Entidad usuaria<input name="entity_name" list="inspection-entity-options" maxlength="255" placeholder="Escribe para buscar la entidad" autocomplete="off" data-entity-input></label>
+          <label class="planning-editor-notes">Notas<textarea name="notes" maxlength="2000" rows="2"></textarea></label>
+          <p class="form-help" id="planning-editor-sheet"></p>
+          <div class="planning-editor-actions">
+            <button type="submit" class="button workflow-approve">Guardar corrección</button>
+            <button type="button" class="button secondary" id="planning-editor-restore">Restaurar datos de las planillas</button>
+            <button type="button" class="button secondary" id="planning-editor-cancel">Cancelar</button>
+          </div>
+          <ol class="planning-editor-history" id="planning-editor-history"></ol>
+        </form>
+        <div class="table-wrap">
+          <table class="workflow-table">
+            <thead><tr><th>Institución</th><th>Práctica</th><th>Departamento</th><th>Última inspección</th><th>Próxima inspección</th><th>Estado</th><th>Equipos</th><th>Planilla</th><th>Acciones</th></tr></thead>
+            <tbody id="planning-rows"></tbody>
+          </table>
+        </div>
+      </section>
     </section>
 
     <section class="pane" id="pane-users">

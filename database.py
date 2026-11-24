@@ -71,9 +71,124 @@ def _initialize_inspections(connection: sqlite3.Connection) -> None:
         "actor_id INTEGER NOT NULL REFERENCES workflow_users(id), "
         "action TEXT NOT NULL, comment TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL)"
     )
+    # Historial detallado (se agregan columnas sin tocar los registros existentes).
+    event_columns = {
+        row["name"] for row in connection.execute("PRAGMA table_info(inspection_events)")
+    }
+    for column, definition in (
+        ("from_stage", "TEXT NOT NULL DEFAULT ''"),
+        ("to_stage", "TEXT NOT NULL DEFAULT ''"),
+        ("details", "TEXT NOT NULL DEFAULT '{}'"),
+    ):
+        if column not in event_columns:
+            connection.execute(f"ALTER TABLE inspection_events ADD COLUMN {column} {definition}")
+    inspection_columns = {
+        row["name"] for row in connection.execute("PRAGMA table_info(inspections)")
+    }
+    if "updated_at" not in inspection_columns:
+        connection.execute(
+            "ALTER TABLE inspections ADD COLUMN updated_at TEXT NOT NULL DEFAULT ''"
+        )
+    if "second_inspector_id" not in inspection_columns:
+        # Segundo inspector: solo ve la inspección agendada; no interviene en el flujo.
+        connection.execute(
+            "ALTER TABLE inspections ADD COLUMN second_inspector_id INTEGER "
+            "REFERENCES workflow_users(id)"
+        )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_inspections_second_inspector "
+        "ON inspections(second_inspector_id)"
+    )
     connection.execute(
         "CREATE INDEX IF NOT EXISTS idx_inspection_events_inspection "
         "ON inspection_events(inspection_id, id)"
+    )
+    _initialize_planning(connection, inspection_columns)
+
+
+def _initialize_planning(connection: sqlite3.Connection, inspection_columns) -> None:
+    """Planificación de inspección: copia de las planillas de la carpeta 5.
+
+    Los valores leídos de las planillas (sheet_*) se actualizan al volver a leerlas;
+    las correcciones manuales (manual_*) y las notas nunca se pisan.
+    """
+    connection.execute(
+        "CREATE TABLE IF NOT EXISTS planning_items ("
+        "id INTEGER PRIMARY KEY, item_key TEXT NOT NULL UNIQUE, "
+        "sheet_institution TEXT NOT NULL DEFAULT '', sheet_practice TEXT NOT NULL DEFAULT '', "
+        "sheet_department TEXT NOT NULL DEFAULT '', sheet_last_inspection TEXT NOT NULL DEFAULT '', "
+        "sheet_next_inspection TEXT NOT NULL DEFAULT '', "
+        "sheet_equipment_count INTEGER NOT NULL DEFAULT 0, "
+        "categories TEXT NOT NULL DEFAULT '[]', sources TEXT NOT NULL DEFAULT '[]', "
+        "in_sheets INTEGER NOT NULL DEFAULT 1, "
+        "manual_institution TEXT, manual_practice TEXT, manual_department TEXT, "
+        "manual_last_inspection TEXT, manual_next_inspection TEXT, "
+        "notes TEXT NOT NULL DEFAULT '', version INTEGER NOT NULL DEFAULT 1, "
+        "created_at TEXT NOT NULL DEFAULT '', sheet_synced_at TEXT NOT NULL DEFAULT '', "
+        "updated_at TEXT NOT NULL DEFAULT '', updated_by INTEGER REFERENCES workflow_users(id))"
+    )
+    connection.execute(
+        "CREATE TABLE IF NOT EXISTS planning_events ("
+        "id INTEGER PRIMARY KEY, item_id INTEGER NOT NULL REFERENCES planning_items(id), "
+        "actor_id INTEGER NOT NULL REFERENCES workflow_users(id), action TEXT NOT NULL, "
+        "created_at TEXT NOT NULL, details TEXT NOT NULL DEFAULT '{}')"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_planning_events_item ON planning_events(item_id, id)"
+    )
+    connection.execute(
+        "CREATE TABLE IF NOT EXISTS planning_sync ("
+        "id INTEGER PRIMARY KEY CHECK (id = 1), synced_at TEXT NOT NULL, "
+        "synced_by INTEGER REFERENCES workflow_users(id), "
+        "files TEXT NOT NULL DEFAULT '[]', errors TEXT NOT NULL DEFAULT '[]', "
+        "root TEXT NOT NULL DEFAULT '', root_exists INTEGER NOT NULL DEFAULT 0)"
+    )
+    sync_columns = {row["name"] for row in connection.execute("PRAGMA table_info(planning_sync)")}
+    if "parser_version" not in sync_columns:
+        connection.execute(
+            "ALTER TABLE planning_sync ADD COLUMN parser_version INTEGER NOT NULL DEFAULT 0"
+        )
+    planning_columns = {row["name"] for row in connection.execute("PRAGMA table_info(planning_items)")}
+    if "entity_name" not in planning_columns:
+        # Entidad usuaria (carpeta de "3 Entidades Usuarias") asociada a la fila.
+        connection.execute(
+            "ALTER TABLE planning_items ADD COLUMN entity_name TEXT NOT NULL DEFAULT ''"
+        )
+    if "entity_name" not in inspection_columns:
+        connection.execute(
+            "ALTER TABLE inspections ADD COLUMN entity_name TEXT NOT NULL DEFAULT ''"
+        )
+    # Ficha de cada entidad usuaria: datos que se van juntando (manual o desde inspecciones).
+    connection.execute(
+        "CREATE TABLE IF NOT EXISTS entity_profiles ("
+        "id INTEGER PRIMARY KEY, entity_key TEXT NOT NULL UNIQUE, entity_name TEXT NOT NULL, "
+        "rut TEXT NOT NULL DEFAULT '', address TEXT NOT NULL DEFAULT '', "
+        "city TEXT NOT NULL DEFAULT '', department TEXT NOT NULL DEFAULT '', "
+        "phone TEXT NOT NULL DEFAULT '', email TEXT NOT NULL DEFAULT '', "
+        "contact_details TEXT NOT NULL DEFAULT '', notes TEXT NOT NULL DEFAULT '', "
+        "version INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, "
+        "updated_at TEXT NOT NULL DEFAULT '', updated_by INTEGER REFERENCES workflow_users(id))"
+    )
+    connection.execute(
+        "CREATE TABLE IF NOT EXISTS entity_profile_events ("
+        "id INTEGER PRIMARY KEY, profile_id INTEGER NOT NULL REFERENCES entity_profiles(id), "
+        "actor_id INTEGER NOT NULL REFERENCES workflow_users(id), action TEXT NOT NULL, "
+        "created_at TEXT NOT NULL, details TEXT NOT NULL DEFAULT '{}')"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_entity_profile_events ON entity_profile_events(profile_id, id)"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_planning_items_entity ON planning_items(entity_name)"
+    )
+    if "planning_item_id" not in inspection_columns:
+        connection.execute(
+            "ALTER TABLE inspections ADD COLUMN planning_item_id INTEGER "
+            "REFERENCES planning_items(id)"
+        )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_inspections_planning_item "
+        "ON inspections(planning_item_id)"
     )
 
 

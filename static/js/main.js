@@ -1,4 +1,4 @@
-import { requestJson } from "./common.js";
+import { lastUpdateText, requestJson } from "./common.js";
 import { initRecords, loadRecords, loadWorkflowRecords } from "./records.js";
 import { initUsers, invalidateLoadedUsers, loadUsers, openLinkedUser } from "./users.js";
 import { initEntities, loadEntities, openLinkedEntity } from "./entities.js";
@@ -60,11 +60,18 @@ async function refreshCatalogStatus() {
   const label = document.getElementById("catalog-status");
   try {
     const status = await requestJson("/api/status");
-    label.textContent = status.catalog_running
+    const text = status.catalog_running
       ? `${status.catalog_message}: ${status.catalog_processed} archivo(s)`
       : status.catalog_errors
       ? `${status.catalog_message} · ${status.catalog_errors} error(es)`
       : status.catalog_message;
+    label.textContent = [
+      text,
+      !status.catalog_running && lastUpdateText(status.catalog_last_finished),
+      status.auto_refresh_minutes
+        ? `automática cada ${status.auto_refresh_minutes} min`
+        : "",
+    ].filter(Boolean).join(" · ");
   } catch (error) {
     label.textContent = `No se pudo consultar el catálogo: ${error.message}`;
   }

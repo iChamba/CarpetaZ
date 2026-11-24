@@ -1,3 +1,14 @@
+export function lastUpdateText(isoDate, now = new Date()) {
+  if (!isoDate) return "";
+  const finished = new Date(isoDate);
+  if (Number.isNaN(finished.getTime())) return "";
+  const minutes = Math.max(0, Math.floor((now - finished) / 60000));
+  if (minutes < 1) return "actualizado hace menos de 1 min";
+  if (minutes < 60) return `actualizado hace ${minutes} min`;
+  const hours = Math.floor(minutes / 60);
+  return `actualizado hace ${hours} h ${minutes % 60} min`;
+}
+
 export function setMessage(id, text = "", kind = "") {
   const target = document.getElementById(id);
   target.textContent = text;
