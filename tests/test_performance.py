@@ -29,7 +29,7 @@ def _make_institution(root: Path, name: str) -> Path:
 class EntityAreasCacheTests(unittest.TestCase):
     def setUp(self):
         initialize_db()
-        entities_module.ENTITY_AREAS_CACHE.update({"key": None, "value": None})
+        entities_module.ENTITY_AREAS_CACHE.update({"key": None, "value": None, "expires": None})
 
     def test_areas_are_reused_until_the_catalog_is_refreshed(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -50,7 +50,7 @@ class EntityAreasCacheTests(unittest.TestCase):
                     [area["institution"] for area in refreshed], ["CENTRO A", "CENTRO B"]
                 )
 
-    def test_scan_with_warnings_is_not_cached(self):
+    def test_scan_with_warnings_is_cached_only_briefly(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             with patch.object(entities_module, "ENTITY_ROOT", root), patch.object(
@@ -58,6 +58,10 @@ class EntityAreasCacheTests(unittest.TestCase):
             ) as scan:
                 entities_module._entity_areas()
                 entities_module._entity_areas()
+                self.assertEqual(scan.call_count, 1)
+                later = entities_module.time.monotonic() + entities_module.PARTIAL_AREAS_SECONDS + 1
+                with patch.object(entities_module.time, "monotonic", return_value=later):
+                    entities_module._entity_areas()
                 self.assertEqual(scan.call_count, 2)
 
     def test_list_entities_counts_documents_and_licenses_per_area(self):

@@ -393,9 +393,14 @@ function renderEntityProfile(data) {
   ));
   heading.append(title);
   profile.append(heading);
-  const record = element("section", undefined, "entity-record");
+  // Si se vuelve a dibujar la misma entidad (el catálogo se actualiza cada 1,2 s mientras
+  // corre) y hay cambios sin guardar en la ficha, se conserva tal cual.
+  const keep = currentEntityRecord && currentEntityRecord.name === data.entity.name
+    && currentEntityRecord.element.dataset.dirty === "1";
+  const record = keep ? currentEntityRecord.element : element("section", undefined, "entity-record");
   profile.append(record);
-  loadEntityRecord(data.entity.name, record);
+  currentEntityRecord = { name: data.entity.name, element: record };
+  if (!keep) loadEntityRecord(data.entity.name, record);
 
   const browser = element(
     "div",
@@ -849,6 +854,7 @@ const equipmentStatus = {
   sin_fecha: ["Sin próxima fecha", "planning-status-none"],
 };
 let entityRecordRequest = 0;
+let currentEntityRecord = null;
 
 function recordDate(value) {
   if (!value) return "—";
@@ -899,7 +905,7 @@ function equipmentTable(items, data, container, mode) {
       const cell = element("td");
       const box = document.createElement("input");
       box.type = "checkbox";
-      box.checked = true;
+      box.checked = item.match === "exact";
       box.value = String(item.id);
       box.setAttribute("aria-label", `Asociar ${item.institution} · ${item.practice}`);
       cell.append(box);
@@ -934,6 +940,10 @@ function equipmentTable(items, data, container, mode) {
 
 function renderEntityRecord(data, container) {
   container.replaceChildren();
+  // Cualquier cambio en la ficha o en las casillas de equipos la marca "sin guardar".
+  container.dataset.dirty = "";
+  container.oninput = () => { container.dataset.dirty = "1"; };
+  container.onchange = container.oninput;
   // Datos de la entidad.
   const form = element("form", undefined, "workflow-form entity-record-form");
   form.append(element("h4", "Datos de la entidad"));
@@ -991,7 +1001,8 @@ function renderEntityRecord(data, container) {
   }
   container.append(form);
 
-  // Equipos y vencimientos.
+  // Equipos y vencimientos (salen de la planificación: solo Jefe de Inspección y administradores).
+  if (!data.can_view_equipment) return;
   const equipment = element("section", undefined, "entity-record-equipment");
   equipment.append(element("h4", `Equipos y vencimientos (${data.equipment.length})`));
   if (data.equipment.length) {
@@ -1004,6 +1015,9 @@ function renderEntityRecord(data, container) {
     suggested.open = !data.equipment.length;
     suggested.append(element("summary",
       `Posibles equipos de esta entidad según el nombre en las planillas (${data.suggested_equipment.length})`));
+    suggested.append(element("p",
+      "Vienen marcados solo los que tienen exactamente el mismo nombre; revisa el resto antes de asociarlos.",
+      "form-help"));
     suggested.append(equipmentTable(data.suggested_equipment, data, container, "suggested"));
     if (data.can_link) {
       const link = element("button", "Asociar seleccionados", "button workflow-approve small");

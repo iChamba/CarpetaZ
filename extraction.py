@@ -345,7 +345,8 @@ def is_authorization_certificate(path: Path) -> bool:
 def is_authorization_individual(text: str) -> bool:
     if not text.strip():
         return False
-    fields = extract_candidate_fields(text)
+    # Con los campos del certificado: los candidatos solos no traen práctica ni fechas.
+    fields = extract_certificate_fields(text, [])
     if not fields["authorization_number"]:
         return False
 

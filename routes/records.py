@@ -41,7 +41,11 @@ CERTIFICATE_IMPORT_STATE = {
 }
 IMPORTABLE_DOCUMENT_EXTENSIONS = {".pdf", ".doc", ".docx", ".txt"}
 # Increment when certificate detection or extraction changes.
-CERTIFICATE_PARSER_VERSION = 1
+# Versión 2: la detección de autorizaciones individuales mira práctica y fechas reales.
+# Solo cambian los archivos que antes se descartaron ("other"); los demás resultados
+# de la versión 1 se reutilizan para no volver a leer todo.
+CERTIFICATE_PARSER_VERSION = 2
+LEGACY_REUSABLE_OUTCOMES = {1: {"certificate", "without_text"}}
 
 
 def _save_extracted_record(relative: str, fields: dict[str, str], is_certificate: bool) -> dict:
@@ -204,8 +208,12 @@ def _run_certificate_import() -> None:
                 try:
                     stat = path.stat()
                     cached = cached_outcomes.get(relative)
-                    if cached and cached[:3] == (
-                        stat.st_size, stat.st_mtime_ns, CERTIFICATE_PARSER_VERSION,
+                    current_version = cached and (
+                        cached[2] == CERTIFICATE_PARSER_VERSION
+                        or cached[3] in LEGACY_REUSABLE_OUTCOMES.get(cached[2], ())
+                    )
+                    if current_version and cached[:2] == (
+                        stat.st_size, stat.st_mtime_ns,
                     ) and (cached[3] != "certificate" or relative in certificate_paths):
                         with CERTIFICATE_IMPORT_STATE_LOCK:
                             CERTIFICATE_IMPORT_STATE["unchanged"] += 1
@@ -351,7 +359,8 @@ class RecordRoutes:
             )
         if extension == ".pdf":
             fields = pdf_fields
-        elif is_authorization_individual(text):
+        elif is_authorization_certificate(path) or is_authorization_individual(text):
+            # Mismo criterio que la importación masiva: el nombre del archivo alcanza.
             fields = extract_certificate_fields(text, [])
         else:
             fields = None

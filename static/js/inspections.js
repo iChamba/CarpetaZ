@@ -1,4 +1,4 @@
-import { element, requestJson, setMessage } from "./common.js";
+import { element, historyItem, personChip, requestJson, setMessage } from "./common.js";
 
 const byId = id => document.getElementById(id);
 const labels = {
@@ -43,10 +43,32 @@ const planningStatus = {
   sin_fecha: ["Sin próxima fecha", "planning-status-none"],
 };
 
+function isoDay(value) {
+  return `${value.getFullYear()}-${String(value.getMonth() + 1).padStart(2, "0")}-${String(value.getDate()).padStart(2, "0")}`;
+}
+
+// Iniciales para el distintivo redondo de cada inspector.
+function personCell(name, emptyText) {
+  const cell = element("td");
+  if (!name) {
+    cell.append(element("span", emptyText, "inspection-person-empty"));
+    return cell;
+  }
+  cell.append(personChip(name));
+  return cell;
+}
+
+function stageBadge(stage) {
+  const badge = element("span", stages[stage] || stage, "inspection-stage-badge");
+  badge.dataset.stage = stage;
+  return badge;
+}
+
 function renderCalendar() {
   byId("inspection-month").textContent = new Intl.DateTimeFormat("es-UY", {
     month: "long", year: "numeric",
   }).format(month);
+  const today = isoDay(new Date());
   const firstDay = (month.getDay() + 6) % 7;
   const days = new Date(month.getFullYear(), month.getMonth() + 1, 0).getDate();
   const body = byId("inspection-calendar-days");
@@ -56,18 +78,28 @@ function renderCalendar() {
     for (let weekday = 0; weekday < 7; weekday++) {
       const day = week * 7 + weekday - firstDay + 1;
       const cell = element("td");
+      if (weekday >= 5) cell.classList.add("weekend");
       if (day > 0 && day <= days) {
-        cell.append(element("span", String(day)));
         const key = `${month.getFullYear()}-${String(month.getMonth() + 1).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
-        for (const inspection of data?.inspections || []) {
-          if (inspection.scheduled_date !== key) continue;
-          const button = element("button", `${inspection.scheduled_time} · ${inspection.company_name || inspection.case_number || `#${inspection.id}`}`, "inspection-calendar-event");
+        cell.append(element("span", String(day), "inspection-calendar-day"));
+        if (key === today) cell.classList.add("today");
+        const events = (data?.inspections || [])
+          .filter(inspection => inspection.scheduled_date === key)
+          .sort((a, b) => (a.scheduled_time || "").localeCompare(b.scheduled_time || ""));
+        for (const inspection of events) {
+          const button = element("button", undefined, "inspection-calendar-event");
+          button.append(element("strong", inspection.scheduled_time || ""),
+            element("span", inspection.company_name || inspection.case_number || `#${inspection.id}`));
+          button.dataset.stage = inspection.stage;
+          button.classList.toggle("selected", inspection.id === selectedId);
           button.type = "button";
           const people = [inspection.inspector_name, inspection.second_inspector_name].filter(Boolean).join(" y ");
           button.title = `${inspection.scheduled_place} · ${people}`;
           button.addEventListener("click", () => selectInspection(inspection.id));
           cell.append(button);
         }
+      } else {
+        cell.classList.add("outside");
       }
       row.append(cell);
     }
@@ -153,8 +185,23 @@ function matchingEntity(name) {
   return key ? (entityNames || []).find(entity => entityKey(entity) === key) || "" : "";
 }
 
+// Datos que se completaron desde la ficha de una entidad, para quitarlos si se cambia de entidad.
+const prefilledFields = new WeakMap();
+const PREFILL_FIELDS = ["rut", "phone", "email", "contact_details", "address", "city"];
+
+function clearPrefilled(form) {
+  const filled = prefilledFields.get(form) || {};
+  for (const [field, value] of Object.entries(filled)) {
+    // Solo se borra si nadie lo cambió a mano después de completarlo.
+    if (form.elements[field].value === value) form.elements[field].value = "";
+  }
+  prefilledFields.delete(form);
+}
+
 // Al elegir la entidad en el formulario de creación se completan los datos vacíos con su ficha.
-async function prefillFromEntity(form) {
+// intro: aviso previo (por ejemplo, el de la planificación) que no debe perderse.
+async function prefillFromEntity(form, intro = "") {
+  clearPrefilled(form);
   const name = form.elements.entity_name.value.trim();
   if (!name) return;
   await loadEntityOptions();
@@ -163,14 +210,19 @@ async function prefillFromEntity(form) {
   try {
     const record = await requestJson(`/api/entity/record?name=${encodeURIComponent(entity)}`);
     if (form.elements.entity_name.value.trim() !== name) return;
-    let filled = 0;
-    for (const field of ["rut", "phone", "email", "contact_details", "address", "city"]) {
+    const filled = {};
+    for (const field of PREFILL_FIELDS) {
       if (!form.elements[field].value && record.profile[field]) {
         form.elements[field].value = record.profile[field];
-        filled += 1;
+        filled[field] = record.profile[field];
       }
     }
-    if (filled) setMessage("inspection-message", `Se completaron ${filled} dato(s) con la ficha de ${entity}.`, "success");
+    prefilledFields.set(form, filled);
+    const count = Object.keys(filled).length;
+    if (count) {
+      setMessage("inspection-message",
+        `${intro ? `${intro} ` : ""}Se completaron ${count} dato(s) con la ficha de ${entity}.`, "success");
+    }
   } catch {
     /* la ficha es opcional: si falla, el formulario sigue igual */
   }
@@ -318,11 +370,13 @@ function selectInspection(id) {
     row.classList.toggle("selected", selected);
     row.querySelector("button").setAttribute("aria-pressed", String(selected));
   }
+  renderCalendar();
   const detail = byId("inspection-detail");
   detail.classList.remove("empty-state");
   const summary = element("div", undefined, "workflow-case-summary");
-  summary.append(element("h3", inspection.company_name || `Inspección #${inspection.id}`),
-    element("p", `Inspección #${inspection.id} · ${stages[inspection.stage] || inspection.stage}`));
+  const subtitle = element("p", `Inspección #${inspection.id}`, "workflow-summary-subtitle");
+  subtitle.append(stageBadge(inspection.stage));
+  summary.append(element("h3", inspection.company_name || `Inspección #${inspection.id}`), subtitle);
   const fields = element("section", undefined, "workflow-application-data");
   fields.append(element("h4", "Datos de la inspección"));
   const list = document.createElement("dl");
@@ -344,12 +398,10 @@ function selectInspection(id) {
     history.append(element("h4", "Historial"));
     const entries = document.createElement("ol");
     for (const event of inspection.events) {
-      const when = new Date(event.created_at).toLocaleString("es-UY");
-      const item = element("li");
-      item.append(element("strong", event.actor_name), ` · ${eventLabels[event.action] || event.action} · ${when}`);
-      if (event.comment) item.append(element("p", event.comment));
-      if (event.details_text) item.append(element("p", event.details_text, "form-help"));
-      entries.append(item);
+      const when = new Date(event.created_at).toLocaleString("es-UY", { dateStyle: "short", timeStyle: "short" });
+      entries.append(historyItem(event.actor_name, `· ${eventLabels[event.action] || event.action}`, when, [
+        [event.comment], [event.details_text, "workflow-history-detail"],
+      ]));
     }
     history.append(entries);
     detail.append(history);
@@ -359,6 +411,8 @@ function selectInspection(id) {
 function renderInspections(inspections) {
   const rows = byId("inspection-rows");
   rows.replaceChildren();
+  const count = byId("inspection-count");
+  if (count) count.textContent = String(inspections.length);
   if (!inspections.length) {
     const row = element("tr");
     const cell = element("td", "No hay inspecciones para mostrar.");
@@ -372,7 +426,7 @@ function renderInspections(inspections) {
     row.className = "workflow-case-row";
     row.dataset.inspectionId = String(inspection.id);
     const first = element("td");
-    const button = element("button", inspection.company_name || inspection.case_number || `Inspección #${inspection.id}`, "button secondary small inspection-row-title");
+    const button = element("button", inspection.company_name || inspection.case_number || `Inspección #${inspection.id}`, "inspection-row-title");
     button.type = "button";
     button.title = `Inspección #${inspection.id}${inspection.case_number ? ` · Trámite ${inspection.case_number}` : ""}`;
     button.setAttribute("aria-pressed", String(inspection.id === selectedId));
@@ -382,12 +436,21 @@ function renderInspections(inspections) {
     if (inspection.case_number && inspection.company_name) {
       first.append(element("span", `Trámite ${inspection.case_number}`, "inspection-row-case"));
     }
-    row.append(first,
-      element("td", requestTypes[inspection.request_type] || "—"),
+    const requestCell = element("td");
+    if (requestTypes[inspection.request_type]) {
+      const tag = element("span", requestTypes[inspection.request_type], "inspection-request-tag");
+      tag.dataset.type = inspection.request_type;
+      requestCell.append(tag);
+    } else {
+      requestCell.append(element("span", "—", "inspection-person-empty"));
+    }
+    const stageCell = element("td");
+    stageCell.append(stageBadge(inspection.stage));
+    row.append(first, requestCell,
       element("td", inspection.practice || "—"),
-      element("td", inspection.inspector_name || "Sin asignar"),
-      element("td", inspection.second_inspector_name || "—"),
-      element("td", stages[inspection.stage] || inspection.stage));
+      personCell(inspection.inspector_name, "Sin asignar"),
+      personCell(inspection.second_inspector_name, "—"),
+      stageCell);
     rows.append(row);
   }
 }
@@ -645,26 +708,29 @@ function scheduleFromPlanning(item) {
   const form = byId("inspection-form");
   form.reset();
   renderCreateAssignment();
+  prefilledFields.delete(form);
   form.elements.company_name.value = item.institution;
   form.elements.practice.value = item.practice;
-  form.elements.city.value = item.department;
+  // El departamento de la planilla no es la ciudad: al guardar, va al Departamento de la ficha.
   form.elements.planning_item_id.value = String(item.id);
   form.elements.entity_name.value = item.entity_name || "";
+  const intro = `Datos precargados desde la planificación: ${item.institution} · ${item.practice}. ` +
+    "Completa el resto y elige al inspector líder.";
+  setMessage("inspection-message", intro, "success");
   if (!item.entity_name) {
     // Si hay una entidad con el mismo nombre que la institución, se sugiere sola.
     loadEntityOptions().then(() => {
       if (!form.elements.entity_name.value && form.elements.planning_item_id.value === String(item.id)) {
         form.elements.entity_name.value = matchingEntity(item.institution);
       }
-      prefillFromEntity(form);
+      prefillFromEntity(form, intro);
     });
   } else {
-    prefillFromEntity(form);
+    prefillFromEntity(form, intro);
   }
   panel.open = true;
   panel.scrollIntoView({ block: "start" });
   form.elements.company_name.focus();
-  setMessage("inspection-message", `Datos precargados desde la planificación: ${item.institution} · ${item.practice}. Completa el resto y elige al inspector líder.`, "success");
 }
 
 async function loadPlanning(sync = false) {
@@ -765,6 +831,11 @@ export function initInspections() {
   });
   byId("planning-editor-restore").addEventListener("click", () => savePlanningItem({ restore: true }));
   byId("planning-editor-cancel").addEventListener("click", () => openPlanningEditor(null));
+  byId("inspection-today").addEventListener("click", () => {
+    const now = new Date();
+    month = new Date(now.getFullYear(), now.getMonth(), 1);
+    renderCalendar();
+  });
   byId("inspection-prev-month").addEventListener("click", () => {
     month = new Date(month.getFullYear(), month.getMonth() - 1, 1);
     renderCalendar();
@@ -789,6 +860,7 @@ export function initInspections() {
       selectedId = created.id;
       const fromPlanning = Boolean(payload.planning_item_id);
       form.reset();
+      prefilledFields.delete(form);
       form.elements.planning_item_id.value = "";
       if (fromPlanning) planning = null;
       byId("inspection-create-panel").open = false;

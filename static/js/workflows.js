@@ -1,4 +1,4 @@
-import { element, makeButton, requestJson, setMessage } from "./common.js";
+import { element, historyItem, makeButton, personChip, requestJson, setMessage } from "./common.js";
 
 let data;
 let selectedCaseId = null;
@@ -426,6 +426,20 @@ export function matchesWorkflowSearch(item, query) {
   return terms.every(term => text.includes(term) || identityMatch(term));
 }
 
+function workflowStageBadge(stageKey, stageName) {
+  const badge = element("span", stageName, "inspection-stage-badge workflow-stage-badge");
+  if (stageKey) badge.dataset.stage = stageKey;
+  return badge;
+}
+
+function caseStatus(item) {
+  if (isRejectedAuthorization(item)) return ["rejected", "Rechazado"];
+  if (item.delivered_at) return ["delivered", deliveryMethodLabels[item.delivery_method] || "Entregado"];
+  if (item.status === "completed") return ["completed", "Finalizado"];
+  if (item.is_observed) return ["observed", "Observado"];
+  return ["active", "En curso"];
+}
+
 function renderCases() {
   const body = byId("workflow-case-rows");
   const appendCase = item => {
@@ -433,16 +447,29 @@ function renderCases() {
     row.className = "workflow-case-row";
     if (item.id === selectedCaseId) row.classList.add("selected");
     row.addEventListener("click", () => selectCase(item.id));
-    const type = element("td", item.request_type
-      ? `${item.workflow_name} · ${requestTypeLabels[item.request_type] || item.request_type}`
-      : item.workflow_name);
+    const type = element("td");
+    type.append(element("span", item.workflow_name, "workflow-row-title"));
+    if (item.request_type) {
+      const tag = element("span", requestTypeLabels[item.request_type] || item.request_type,
+        "inspection-request-tag workflow-request-tag");
+      tag.dataset.type = item.request_type;
+      type.append(tag);
+    }
     const applicant = [item.applicant_first_name, item.applicant_last_name].filter(Boolean).join(" ");
-    const subject = element("td", applicant || item.applicant_company_name || item.title);
-    const stage = element("td", item.stage_name);
-    const assigned = element("td", assignedLabel(item));
-    const status = element("td", isRejectedAuthorization(item) ? "Rechazado"
-      : item.delivered_at ? deliveryMethodLabels[item.delivery_method] || "Entregado"
-      : item.status === "completed" ? "Finalizado" : item.is_observed ? "Observado" : "En curso");
+    const subject = element("td");
+    subject.append(element("span", applicant || item.applicant_company_name || item.title, "workflow-row-subject"));
+    if (item.reference) subject.append(element("span", item.reference, "inspection-row-case"));
+    const stage = element("td");
+    stage.append(workflowStageBadge(item.stage_key, item.stage_name));
+    const assigned = element("td");
+    const assignee = assignedLabel(item);
+    assigned.append(assignee === "Sin asignar"
+      ? element("span", assignee, "inspection-person-empty") : personChip(assignee));
+    const status = element("td");
+    const [statusKey, statusText] = caseStatus(item);
+    const statusPill = element("span", statusText, "workflow-status-pill");
+    statusPill.dataset.status = statusKey;
+    status.append(statusPill);
     const deadlineCell = element("td");
     const deadline = element("span", undefined, "workflow-deadline-badge workflow-deadline");
     deadline.dataset.caseId = item.id;
@@ -548,10 +575,12 @@ function renderCases() {
       });
     }
     if (tabs.children[index] !== button) tabs.insertBefore(button, tabs.children[index] || null);
-    button.textContent = `${group.label} (${group.cases.length})`;
+    button.replaceChildren(group.label, " ",
+      element("span", String(group.cases.length), "workflow-case-tab-count"));
     button.setAttribute("aria-pressed", String(group.key === selectedCaseGroup));
   });
 
+  byId("workflow-case-count").textContent = String(data.cases.length);
   body.replaceChildren();
   const activeCases = caseGroups.find(group => group.key === selectedCaseGroup).cases;
   if (activeCases.length) {
@@ -769,44 +798,55 @@ function renderTransitions() {
   const summary = element("div", undefined, "workflow-case-summary");
   const applicant = [selected.applicant_first_name, selected.applicant_last_name].filter(Boolean).join(" ");
   summary.append(element("h3", applicant || selected.applicant_company_name || selected.title));
-  summary.append(element("p", `${selected.workflow_name} · ${selected.stage_name}`));
-  if (selected.is_observed) summary.append(element("p", "Estado: Observado"));
-  if (isRejectedAuthorization(selected)) summary.append(element("p", "Estado: Rechazado"));
-  if (selected.request_type) summary.append(element("p", `Solicitud: ${requestTypeLabels[selected.request_type] || selected.request_type}`));
-  if (selected.inspector_name) summary.append(element("p", `Inspector asignado: ${selected.inspector_name}`));
-  if (selected.reference) summary.append(element("p", `Referencia: ${selected.reference}`));
+  const subtitle = element("p", selected.workflow_name, "workflow-summary-subtitle");
+  subtitle.append(workflowStageBadge(selected.stage_key, selected.stage_name));
+  const [statusKey, statusText] = caseStatus(selected);
+  if (statusKey !== "active" && statusText !== selected.stage_name) {
+    const statusPill = element("span", statusText, "workflow-status-pill");
+    statusPill.dataset.status = statusKey;
+    subtitle.append(statusPill);
+  }
+  summary.append(subtitle);
+  if (selected.description) summary.append(element("p", selected.description, "workflow-summary-description"));
+  const meta = element("dl", undefined, "workflow-summary-meta");
+  const addMeta = (label, value) => {
+    const entry = element("div");
+    const valueNode = element("dd");
+    valueNode.append(value);
+    entry.append(element("dt", label), valueNode);
+    meta.append(entry);
+  };
+  if (selected.request_type) addMeta("Solicitud", requestTypeLabels[selected.request_type] || selected.request_type);
+  if (selected.reference) addMeta("Referencia", selected.reference);
   for (const [label, name, kind] of [
     ["Carpeta vinculada", selected.linked_user_name, "users"],
     ["Entidad vinculada", selected.linked_entity_name, "entities"],
   ]) {
     if (!name) continue;
-    const line = element("p", `${label}: `);
     const link = element("a", name, "workflow-profile-link");
     link.href = `#pane-${kind}`;
     link.addEventListener("click", event => {
       event.preventDefault();
       window.dispatchEvent(new CustomEvent("workflow-open-linked-profile", { detail: { kind, name } }));
     });
-    line.append(link);
-    summary.append(line);
+    addMeta(label, link);
   }
-  if (selected.description) summary.append(element("p", selected.description));
-  summary.append(element("p", `Responsable: ${assignedLabel(selected)}`));
-  summary.append(element("p", `Ingresó a la etapa: ${formatDate(selected.entered_stage_at)}`));
-  const deadlineLine = element("p");
+  if (selected.inspector_name) addMeta("Inspector asignado", selected.inspector_name);
+  addMeta("Responsable", assignedLabel(selected));
+  addMeta("Ingresó a la etapa", formatDate(selected.entered_stage_at));
+  if (selected.status !== "active") {
+    addMeta("Finalizado", formatDate(selected.completed_at));
+    if (selected.delivered_at) {
+      addMeta("Entregado", `${formatDate(selected.delivered_at)} · ${selected.delivered_by_name}`);
+      if (selected.delivery_method) addMeta("Modalidad de entrega", deliveryMethodLabels[selected.delivery_method]);
+    }
+  }
+  summary.append(meta);
+  const deadlineLine = element("p", undefined, "workflow-summary-deadline");
   const deadline = element("span", undefined, "workflow-deadline-badge workflow-deadline-detail");
   updateDeadlineDisplay(deadline, selected, true);
   deadlineLine.append(deadline);
   summary.append(deadlineLine);
-  if (selected.status !== "active") {
-    summary.append(element("p", `Finalizado: ${formatDate(selected.completed_at)}`));
-    if (selected.delivered_at) {
-      summary.append(element("p", `Entregado: ${formatDate(selected.delivered_at)} · ${selected.delivered_by_name}`));
-      if (selected.delivery_method) {
-        summary.append(element("p", deliveryMethodLabels[selected.delivery_method]));
-      }
-    }
-  }
   container.replaceChildren(summary);
   const applicationData = detail?.application_data || detail?.entity_application_data;
   if (applicationData) {
@@ -930,7 +970,9 @@ function renderTransitions() {
     if (detail?.transitions.length) {
       container.append(element("h4", "Acciones disponibles"));
       const comment = document.createElement("textarea");
-      comment.placeholder = "Comentario o motivo (opcional)";
+      comment.placeholder = isInspectionWorkflow(selected) && selected.stage_key === "evaluacion_inspector"
+        ? "Comentario o motivo (obligatorio para observar o rechazar)"
+        : "Comentario o motivo (opcional)";
       comment.maxLength = 1000;
       comment.setAttribute("aria-label", "Comentario de la acción");
       container.append(comment);
@@ -1050,6 +1092,11 @@ function renderTransitions() {
         const button = makeButton(label, "transition-workflow-case",
           `button ${actionStyle || "primary"}`);
         button.addEventListener("click", () => {
+          if (inspectionActions && transition.to_stage_key === "carga_datos" && !comment.value.trim()) {
+            setMessage("workflow-message", "Ingresa el motivo de la observación.", "error");
+            comment.focus();
+            return;
+          }
           if (inspectionActions && transition.to_stage_key === "rechazado") {
             if (!comment.value.trim()) {
               setMessage("workflow-message", "Ingresa el motivo del rechazo.", "error");
@@ -1074,7 +1121,6 @@ function renderTransitions() {
   } else {
     const list = document.createElement("ol");
     for (const event of detail.events) {
-      const item = document.createElement("li");
       const descriptions = {
         created: "inició el trámite",
         assigned: "cambió la asignación",
@@ -1082,30 +1128,29 @@ function renderTransitions() {
         delivered: "marcó el trámite como entregado",
         folder_linked: "vinculó una carpeta",
       };
-      item.append(element("strong", event.actor_name));
-      if (event.event_type === "transitioned") {
-        item.append(" avanzó de ", element("strong", event.from_stage_name), " a ",
-                    element("strong", event.to_stage_name));
-      } else {
-        item.append(` ${descriptions[event.event_type] || event.event_type}`);
-      }
-      item.append(` · ${formatDate(event.created_at)}`);
+      const action = event.event_type === "transitioned"
+        ? ["avanzó de ", element("strong", event.from_stage_name), " a ", element("strong", event.to_stage_name)]
+        : [descriptions[event.event_type] || event.event_type];
+      let assignee = "";
       if (event.event_type === "assigned") {
-        const assignee = event.to_user_name || event.to_group_name || "Sin asignar";
-        item.append(" · Responsable: ", element("strong", assignee));
-      }
-      if (event.event_type === "transitioned" && (event.to_user_name || event.to_group_name)) {
-        item.append(" · Responsable: ", element("strong", event.to_user_name || event.to_group_name));
+        assignee = event.to_user_name || event.to_group_name || "Sin asignar";
+      } else if (event.event_type === "transitioned" && (event.to_user_name || event.to_group_name)) {
+        assignee = event.to_user_name || event.to_group_name;
       } else if (event.event_type === "transitioned" && event.to_stage_key === "finalizado"
           && isInspectionWorkflow(selected)) {
-        item.append(" · Responsable: ", element("strong", "Secretaría"));
+        assignee = "Secretaría";
+      }
+      if (assignee) {
+        const extra = element("span", " · Responsable: ", "workflow-history-extra");
+        extra.append(element("strong", assignee));
+        action.push(extra);
       }
       if (event.event_type === "delivered" && event.duration_seconds !== null
           && event.duration_seconds !== undefined) {
-        item.append(element("span", ` · Tiempo hasta la entrega: ${formatDuration(event.duration_seconds)}`));
+        action.push(element("span", ` · Tiempo hasta la entrega: ${formatDuration(event.duration_seconds)}`,
+          "workflow-history-extra"));
       }
-      if (event.comment) item.append(element("p", event.comment));
-      list.append(item);
+      list.append(historyItem(event.actor_name, action, formatDate(event.created_at), [[event.comment]]));
     }
     history.append(list);
   }

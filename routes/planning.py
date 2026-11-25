@@ -17,6 +17,7 @@ from openpyxl.utils import get_column_letter
 
 import settings
 from database import connect_db
+from routes.entities import _entity_name_key
 from routes.inspections import entity_name_or_error
 from inspection_planning import (
     PARSER_VERSION, SORTS, STATUS_LABELS, filter_groups, item_key, load_planning, status_for,
@@ -30,10 +31,12 @@ LABELS = {
     "institution": "Institución", "practice": "Práctica", "department": "Departamento",
     "last_inspection": "Última inspección", "next_inspection": "Próxima inspección",
     "notes": "Notas", "inspection": "Inspección", "entity_name": "Entidad",
+    "fields": "Campos",
 }
 ACTION_LABELS = {
     "edit": "Datos corregidos", "restore": "Restaurados los datos de las planillas",
     "scheduled": "Inspección agendada",
+    "sheet_match": "La planilla ahora coincide con la corrección",
 }
 SORT_LABELS = {
     "next": "Próxima inspección", "last": "Última inspección",
@@ -67,34 +70,60 @@ def _day(value):
 
 
 def sync_planning(connection, root, user_id) -> dict:
-    """Vuelca las planillas en planning_items sin tocar correcciones ni notas."""
+    """Vuelca las planillas en planning_items sin tocar correcciones ni notas.
+
+    Si la lectura cambia los datos de una fila, sube su versión: así un editor abierto
+    con los datos viejos no los guarda como corrección manual. Una corrección manual
+    que ahora coincide con la planilla deja de serlo.
+    """
     planning = load_planning(root)
     now = _now()
     connection.execute("BEGIN IMMEDIATE")
     try:
+        existing = {
+            row["item_key"]: row for row in connection.execute("SELECT * FROM planning_items")
+        }
         seen = set()
         for group in planning["groups"]:
             key = item_key(group["institution"], group["practice"])
             seen.add(key)
+            sheet = {field: group[field] or "" for field in EDITABLE}
             values = (
-                group["institution"], group["practice"], group["department"],
-                group["last_inspection"], group["next_inspection"], group["equipment_count"],
+                *(sheet[field] for field in EDITABLE), group["equipment_count"],
                 json.dumps(group["categories"], ensure_ascii=False),
                 json.dumps(group["sources"], ensure_ascii=False), now,
             )
-            updated = connection.execute(
-                "UPDATE planning_items SET sheet_institution = ?, sheet_practice = ?, "
-                "sheet_department = ?, sheet_last_inspection = ?, sheet_next_inspection = ?, "
-                "sheet_equipment_count = ?, categories = ?, sources = ?, sheet_synced_at = ?, "
-                "in_sheets = 1 WHERE item_key = ?", (*values, key),
-            ).rowcount
-            if not updated:
+            row = existing.get(key)
+            if row is None:
                 connection.execute(
                     "INSERT INTO planning_items (sheet_institution, sheet_practice, "
                     "sheet_department, sheet_last_inspection, sheet_next_inspection, "
                     "sheet_equipment_count, categories, sources, sheet_synced_at, item_key, "
                     "created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (*values, key, now),
+                )
+                continue
+            changed = any(row[f"sheet_{field}"] != sheet[field] for field in EDITABLE)
+            matched = [
+                field for field in EDITABLE
+                if row[f"manual_{field}"] is not None and row[f"manual_{field}"] == sheet[field]
+            ]
+            cleared = "".join(f", manual_{field} = NULL" for field in matched)
+            connection.execute(
+                "UPDATE planning_items SET sheet_institution = ?, sheet_practice = ?, "
+                "sheet_department = ?, sheet_last_inspection = ?, sheet_next_inspection = ?, "
+                "sheet_equipment_count = ?, categories = ?, sources = ?, sheet_synced_at = ?, "
+                f"in_sheets = 1, version = version + ?{cleared} WHERE id = ?",
+                (*values, 1 if changed or matched else 0, row["id"]),
+            )
+            if matched:
+                connection.execute(
+                    "INSERT INTO planning_events (item_id, actor_id, action, created_at, details) "
+                    "VALUES (?, ?, 'sheet_match', ?, ?)",
+                    (row["id"], user_id, now, json.dumps(
+                        {"fields": ", ".join(LABELS[field] for field in matched)},
+                        ensure_ascii=False,
+                    )),
                 )
         # Solo se marca "ya no figura" si todas las planillas se pudieron leer.
         if planning["root_exists"] and planning["files"] and not planning["errors"]:
@@ -271,6 +300,17 @@ class PlanningRoutes:
         restore = data.get("restore") is True
         connection = connect_db()
         try:
+            # La entidad se valida antes de bloquear la base (recorre carpetas) y solo
+            # si cambió: una fila con una entidad renombrada sigue siendo editable.
+            entity_name = None
+            if not restore and "entity_name" in data:
+                current = connection.execute(
+                    "SELECT entity_name FROM planning_items WHERE id = ?", (item_id,)
+                ).fetchone()
+                requested = data.get("entity_name")
+                if not (current and isinstance(requested, str)
+                        and _entity_name_key(requested) == _entity_name_key(current["entity_name"])):
+                    entity_name = entity_name_or_error(requested)
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
                 "SELECT * FROM planning_items WHERE id = ?", (item_id,)
@@ -283,6 +323,8 @@ class PlanningRoutes:
                 return self.send_error_json(
                     "Otra persona modificó esta fila. Vuelve a cargar la planificación.", 409
                 )
+            if entity_name is None:
+                entity_name = row["entity_name"]
             changes, updates = {}, {}
             for field, limit in EDITABLE.items():
                 sheet_value = row[f"sheet_{field}"]
@@ -313,11 +355,8 @@ class PlanningRoutes:
                 notes = notes.strip()
                 if notes != row["notes"]:
                     changes["notes"] = [row["notes"], notes]
-                entity_name = entity_name_or_error(data.get("entity_name", row["entity_name"]))
                 if entity_name != row["entity_name"]:
                     changes["entity_name"] = [row["entity_name"], entity_name]
-            else:
-                entity_name = row["entity_name"]
             if changes:
                 now = _now()
                 assignments = ", ".join(f"{column} = ?" for column in updates)

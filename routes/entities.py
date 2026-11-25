@@ -4,6 +4,7 @@ import os
 import re
 import subprocess
 import threading
+import time
 import unicodedata
 from calendar import monthrange
 from datetime import date, datetime
@@ -27,7 +28,10 @@ ENTITY_IMPORT_LOCK = threading.Lock()
 # Recorrer la carpeta compartida es lento; el árbol de instituciones se reutiliza
 # hasta que termina una nueva actualización del catálogo.
 ENTITY_AREAS_CACHE_LOCK = threading.Lock()
-ENTITY_AREAS_CACHE: dict = {"key": None, "value": None}
+ENTITY_AREAS_CACHE: dict = {"key": None, "value": None, "expires": None}
+# Un recorrido con ubicaciones inaccesibles se reutiliza solo este tiempo y después se
+# reintenta; sin esto cada pantalla de entidades recorría toda la carpeta otra vez.
+PARTIAL_AREAS_SECONDS = 60
 ENTITY_IMPORT_STATE_LOCK = threading.Lock()
 ENTITY_IMPORT_STATE = {
     "has_run": False,
@@ -113,15 +117,17 @@ def _entity_areas() -> tuple[list[dict[str, str | Path]], int]:
         generation = INDEX_STATE.get("catalog_generation", 0)
     key = (str(ENTITY_ROOT), str(APP_DATA), generation)
     with ENTITY_AREAS_CACHE_LOCK:
-        if ENTITY_AREAS_CACHE["key"] == key:
+        expires = ENTITY_AREAS_CACHE.get("expires")
+        if ENTITY_AREAS_CACHE["key"] == key and (expires is None or time.monotonic() < expires):
             areas, warnings = ENTITY_AREAS_CACHE["value"]
             return list(areas), warnings
     areas, warnings = _scan_entity_areas()
-    # Un recorrido con ubicaciones inaccesibles no se guarda, para reintentarlo.
-    if not warnings:
-        with ENTITY_AREAS_CACHE_LOCK:
-            ENTITY_AREAS_CACHE["key"] = key
-            ENTITY_AREAS_CACHE["value"] = (areas, warnings)
+    with ENTITY_AREAS_CACHE_LOCK:
+        ENTITY_AREAS_CACHE["key"] = key
+        ENTITY_AREAS_CACHE["value"] = (areas, warnings)
+        ENTITY_AREAS_CACHE["expires"] = (
+            time.monotonic() + PARTIAL_AREAS_SECONDS if warnings else None
+        )
     return list(areas), warnings
 
 
@@ -193,7 +199,8 @@ def _entity_area_folder(relative_path: object) -> Path:
     relative = Path(relative_path)
     if (
         relative.is_absolute()
-        or len(relative.parts) not in {2, 3, 4, 5}
+        # Práctica + hasta 4 carpetas intermedias + institución, igual que el escaneo.
+        or not 2 <= len(relative.parts) <= 6
         or any(part in {"", ".", ".."} for part in relative.parts)
     ):
         raise ValueError("La ruta de la institución no es válida.")
@@ -372,7 +379,8 @@ def _entity_import_worker(incremental: bool = False) -> None:
 
 
 def _license_is_current(relative: str, path: Path) -> bool:
-    """True si la licencia ya se procesó (con tablas) después de la última modificación."""
+    """Criterio anterior (por fecha), solo para licencias procesadas antes de existir
+    entity_license_import_cache: True si se procesó (con tablas) después de modificarse."""
     connection = connect_db()
     try:
         row = connection.execute(
@@ -425,16 +433,58 @@ def _run_entity_import(incremental: bool = False) -> None:
                 "message": "Buscando licencias de operación",
             })
 
+        cache = connect_db()
+        try:
+            cached_files = {
+                row["path"]: (row["size"], row["modified_ns"], row["outcome"])
+                for row in cache.execute(
+                    "SELECT path, size, modified_ns, outcome FROM entity_license_import_cache"
+                )
+            }
+            saved_licenses = {
+                row["source_path"] for row in cache.execute(
+                    "SELECT source_path FROM entity_licenses WHERE technical_tables IS NOT NULL"
+                )
+            }
+        finally:
+            cache.close()
+
+        def remember(relative: str, stat, outcome: str) -> None:
+            connection = connect_db()
+            try:
+                connection.execute(
+                    "INSERT INTO entity_license_import_cache (path, size, modified_ns, outcome) "
+                    "VALUES (?, ?, ?, ?) ON CONFLICT(path) DO UPDATE SET size = excluded.size, "
+                    "modified_ns = excluded.modified_ns, outcome = excluded.outcome",
+                    (relative, stat.st_size, stat.st_mtime_ns, outcome),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
         for path in files:
             relative = path.relative_to(ENTITY_ROOT).as_posix()
             try:
                 safe_path, relative = safe_relative_path(relative, ENTITY_ROOT)
-                if incremental and _license_is_current(relative, safe_path):
-                    with ENTITY_IMPORT_STATE_LOCK:
-                        ENTITY_IMPORT_STATE["unchanged"] += 1
-                    continue
+                # Se toma antes de leer: si el archivo cambia durante la lectura, la
+                # próxima revisión lo vuelve a leer.
+                stat = safe_path.stat()
+                if incremental:
+                    cached = cached_files.get(relative)
+                    if cached is None and _license_is_current(relative, safe_path):
+                        remember(relative, stat, "license")
+                        cached = (stat.st_size, stat.st_mtime_ns, "license")
+                    if cached and cached[:2] == (stat.st_size, stat.st_mtime_ns) and (
+                        cached[2] != "license" or relative in saved_licenses
+                    ):
+                        with ENTITY_IMPORT_STATE_LOCK:
+                            ENTITY_IMPORT_STATE["unchanged"] += 1
+                            if cached[2] in ("without_text", "without_license"):
+                                ENTITY_IMPORT_STATE[cached[2]] += 1
+                        continue
                 text, technical_tables = _extract_license_content(safe_path)
                 if not text.strip():
+                    remember(relative, stat, "without_text")
                     with ENTITY_IMPORT_STATE_LOCK:
                         ENTITY_IMPORT_STATE["without_text"] += 1
                     continue
@@ -442,15 +492,16 @@ def _run_entity_import(incremental: bool = False) -> None:
                     extract_operation_license(path.name) or extract_operation_license(text)
                 )
                 if not license_number:
+                    remember(relative, stat, "without_license")
                     with ENTITY_IMPORT_STATE_LOCK:
                         ENTITY_IMPORT_STATE["without_license"] += 1
                     continue
-                if _save_license(relative, license_number, extract_license_details(text), technical_tables):
-                    with ENTITY_IMPORT_STATE_LOCK:
-                        ENTITY_IMPORT_STATE["updated"] += 1
-                else:
-                    with ENTITY_IMPORT_STATE_LOCK:
-                        ENTITY_IMPORT_STATE["imported"] += 1
+                updated = _save_license(
+                    relative, license_number, extract_license_details(text), technical_tables,
+                )
+                remember(relative, stat, "license")
+                with ENTITY_IMPORT_STATE_LOCK:
+                    ENTITY_IMPORT_STATE["updated" if updated else "imported"] += 1
             except Exception as exc:
                 with ENTITY_IMPORT_STATE_LOCK:
                     ENTITY_IMPORT_STATE["errors"] += 1

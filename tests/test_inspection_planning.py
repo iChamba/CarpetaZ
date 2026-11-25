@@ -1,4 +1,5 @@
 import os
+import sqlite3
 import tempfile
 from io import BytesIO
 import unittest
@@ -386,6 +387,143 @@ class PlanningRouteTests(PlanningTests):
         synced = self.call("chief", "sync_inspection_planning", {})
         row = {entry["id"]: entry for entry in synced.response[1]["items"]}[item["id"]]
         self.assertEqual(row["entity_name"], "Fábrica Norte")
+
+    # --- Correcciones de la revisión de código ---
+
+    def rewrite_industrial(self, next_fabrica):
+        """Vuelve a escribir la planilla industrial con otra próxima fecha para Fábrica."""
+        write(self.root / "INSPECCIONES" / "PL-11-16 Planilla de instalaciones INDUSTRIALES.xlsx", {
+            "MEDIDORES": [
+                [], [],
+                ["USUARIO:", "DIRECCIÓN", "DEPARTAMENTO:", None, "ÚLTIMA  INSPECCIÓN:", "PRÓXIMA INSPECCIÓN:"],
+                [None, "DE INSTALACIÓN:", None, "FECHA:", "C/OBS:", None],
+                ["Fábrica", "Ruta 8", "LAVALLEJA", datetime(2025, 11, 1), None, next_fabrica],
+                ["Puerto", "Rambla", "MONTEVIDEO", datetime(2020, 1, 1), None, datetime(2022, 1, 1)],
+            ],
+        })
+        inspection_planning._cache.clear()
+
+    def assert_unlocked(self, real):
+        """Envuelve la validación de entidad para comprobar que corre sin la base bloqueada."""
+        calls = []
+
+        def check(value):
+            other = sqlite3.connect(database.DATABASE, timeout=0)
+            try:
+                other.execute("BEGIN IMMEDIATE")
+                other.rollback()
+            finally:
+                other.close()
+            calls.append(value)
+            return real(value)
+        return check, calls
+
+    def test_rereading_changed_sheets_blocks_a_stale_editor(self):
+        item = self.items()[("Fábrica", "Medidores")]
+        self.rewrite_industrial(datetime(2028, 2, 1))
+        self.call("chief", "sync_inspection_planning", {})
+        fresh = self.items()[("Fábrica", "Medidores")]
+        self.assertEqual(fresh["next_inspection"], "2028-02-01")
+        self.assertEqual(fresh["version"], item["version"] + 1)
+        # El editor abierto antes de releer no fija la fecha vieja como corrección manual.
+        stale = self.call("chief", "update_planning_item", {
+            "id": item["id"], "version": item["version"],
+            "next_inspection": item["next_inspection"], "notes": "x",
+        })
+        self.assertEqual(stale.response[0], 409)
+        self.assertEqual(self.items()[("Fábrica", "Medidores")]["edited"], [])
+        # Releer sin cambios no sube la versión.
+        self.call("chief", "sync_inspection_planning", {})
+        self.assertEqual(self.items()[("Fábrica", "Medidores")]["version"], fresh["version"])
+
+    def test_manual_value_matching_the_sheet_stops_being_manual(self):
+        item = self.items()[("Fábrica", "Medidores")]
+        edited = self.call("chief", "update_planning_item", {
+            "id": item["id"], "version": item["version"], "next_inspection": "2027-03-01",
+        })
+        self.assertEqual(edited.response[0], 200)
+        self.assertEqual(self.items()[("Fábrica", "Medidores")]["edited"], ["next_inspection"])
+        self.rewrite_industrial(datetime(2027, 3, 1))
+        self.call("chief", "sync_inspection_planning", {})
+        row = self.items()[("Fábrica", "Medidores")]
+        self.assertEqual((row["edited"], row["next_inspection"]), ([], "2027-03-01"))
+        self.assertEqual(row["events"][-1]["action"], "La planilla ahora coincide con la corrección")
+        self.assertIn("Próxima inspección", row["events"][-1]["details_text"])
+
+    def test_row_with_renamed_entity_folder_stays_editable(self):
+        item = self.items()[("Fábrica", "Medidores")]
+        import routes.planning as planning_module
+        check, calls = self.assert_unlocked(planning_module.entity_name_or_error)
+        with self.entities(), mock.patch.object(planning_module, "entity_name_or_error", side_effect=check):
+            linked = self.call("chief", "update_planning_item", {
+                "id": item["id"], "version": item["version"], "entity_name": "fábrica norte",
+            })
+        self.assertEqual(calls, ["fábrica norte"])
+        row = {entry["id"]: entry for entry in linked.response[1]["items"]}[item["id"]]
+        # La carpeta de la entidad se renombró: ya no figura entre las entidades.
+        with mock.patch("routes.inspections._entity_areas", return_value=([], 0)):
+            saved = self.call("chief", "update_planning_item", {
+                "id": item["id"], "version": row["version"], "entity_name": "Fábrica Norte",
+                "notes": "Sigue siendo editable",
+            })
+            self.assertEqual(saved.response[0], 200)
+            row = {entry["id"]: entry for entry in saved.response[1]["items"]}[item["id"]]
+            self.assertEqual((row["notes"], row["entity_name"]), ("Sigue siendo editable", "Fábrica Norte"))
+            with self.assertRaises(ValueError):
+                self.call("chief", "update_planning_item", {
+                    "id": item["id"], "version": row["version"], "entity_name": "Otra",
+                })
+
+    def test_scheduling_links_entity_and_bumps_planning_version(self):
+        item = self.items()[("Fábrica", "Medidores")]
+        with self.entities():
+            created = self.call("chief", "create_inspection", {
+                "company_name": "Fábrica", "entity_name": "Fábrica Norte",
+                "inspector_id": self.users["inspector"]["id"], "planning_item_id": item["id"],
+            })
+            self.assertEqual(created.response[0], 201)
+            row = self.items()[("Fábrica", "Medidores")]
+            self.assertEqual((row["entity_name"], row["version"]), ("Fábrica Norte", item["version"] + 1))
+            self.assertIn("Entidad: (vacío) → Fábrica Norte", row["events"][-1]["details_text"])
+            # Un editor abierto antes de agendar ya no borra la entidad al guardar.
+            stale = self.call("chief", "update_planning_item", {
+                "id": item["id"], "version": item["version"], "entity_name": "", "notes": "x",
+            })
+            self.assertEqual(stale.response[0], 409)
+        # El departamento de la planilla va a Departamento de la ficha, no a Ciudad.
+        connection = database.connect_db()
+        profile = connection.execute(
+            "SELECT city, department FROM entity_profiles WHERE entity_name = 'Fábrica Norte'"
+        ).fetchone()
+        connection.close()
+        self.assertEqual((profile["city"], profile["department"]), ("", "LAVALLEJA"))
+
+    def test_set_entity_checks_outside_lock_and_bumps_planning_version(self):
+        item = self.items()[("Puerto", "Medidores")]
+        created = self.call("chief", "create_inspection", {
+            "inspector_id": self.users["inspector"]["id"], "planning_item_id": item["id"],
+        })
+        inspection_id = created.response[1]["id"]
+        import routes.inspections as inspections_module
+        check, calls = self.assert_unlocked(inspections_module.entity_name_or_error)
+        with self.entities(), mock.patch.object(inspections_module, "entity_name_or_error", side_effect=check):
+            changed = self.call("chief", "act_on_inspection", {
+                "inspection_id": inspection_id, "version": 1, "action": "set_entity",
+                "entity_name": "Fábrica Norte",
+            })
+        self.assertEqual((changed.response[0], calls), (200, ["Fábrica Norte"]))
+        row = self.items()[("Puerto", "Medidores")]
+        self.assertEqual((row["entity_name"], row["version"]), ("Fábrica Norte", item["version"] + 1))
+        self.assertIn(f"Inspección: #{inspection_id}", row["events"][-1]["details_text"])
+
+    def test_second_inspector_needs_a_lead_first(self):
+        created = self.call("secretary", "create_inspection", {"company_name": "Fábrica"})
+        with self.assertRaises(ValueError):
+            self.call("chief", "act_on_inspection", {
+                "inspection_id": created.response[1]["id"], "version": 0, "action": "set_second",
+                "second_inspector_id": self.users["inspector"]["id"],
+            })
+        self.assertIsNone(self.inspection(created.response[1]["id"])["second_inspector_id"])
 
     def export(self, user, **params):
         handler = Handler(self.users[user])

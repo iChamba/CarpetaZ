@@ -74,7 +74,7 @@
       <div class="inspection-layout">
         <div class="inspection-column">
           <section class="inspection-list">
-            <h3>Inspecciones</h3>
+            <div class="inspection-section-heading"><h3>Inspecciones</h3><span class="inspection-count" id="inspection-count"></span></div>
             <div class="table-wrap">
               <table class="workflow-table">
                 <thead><tr><th>Institución</th><th>Tipo de solicitud</th><th>Práctica</th><th>Inspector líder</th><th>Segundo inspector</th><th>Etapa</th></tr></thead>
@@ -83,11 +83,12 @@
             </div>
           </section>
           <section class="inspection-calendar" aria-labelledby="inspection-calendar-title">
-            <h3 id="inspection-calendar-title">Calendario de inspecciones</h3>
+            <div class="inspection-section-heading"><h3 id="inspection-calendar-title">Calendario de inspecciones</h3></div>
             <div class="inspection-calendar-nav">
-              <button type="button" class="button secondary small" id="inspection-prev-month">Mes anterior</button>
+              <button type="button" class="inspection-calendar-arrow" id="inspection-prev-month" aria-label="Mes anterior" title="Mes anterior">‹</button>
               <strong id="inspection-month" aria-live="polite"></strong>
-              <button type="button" class="button secondary small" id="inspection-next-month">Mes siguiente</button>
+              <button type="button" class="inspection-calendar-arrow" id="inspection-next-month" aria-label="Mes siguiente" title="Mes siguiente">›</button>
+              <button type="button" class="button secondary small inspection-calendar-today" id="inspection-today">Hoy</button>
             </div>
             <table class="inspection-calendar-grid">
               <thead><tr><th>Lun</th><th>Mar</th><th>Mié</th><th>Jue</th><th>Vie</th><th>Sáb</th><th>Dom</th></tr></thead>
@@ -342,9 +343,9 @@
         </form>
       </details>
       <div class="workflow-layout">
-        <section>
+        <section class="workflow-list">
           <div class="workflow-list-heading">
-            <h3>Trámites</h3>
+            <div class="inspection-section-heading"><h3>Trámites</h3><span class="inspection-count" id="workflow-case-count"></span></div>
             <div class="workflow-list-actions">
               <a class="button secondary small hidden" id="workflow-export" href="/api/workflow/export">Exportar trámites e historial (.xlsx)</a>
               <button type="button" class="button secondary small" id="workflow-refresh">Actualizar</button>

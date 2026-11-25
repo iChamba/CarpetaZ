@@ -88,6 +88,15 @@ class LoginThrottleTests(unittest.TestCase):
         self.assertGreater(throttle.retry_after("admin", "10.0.0.2"), 0)
         self.assertEqual(throttle.retry_after("otra", "10.0.0.1"), 0)
 
+    def test_own_login_does_not_reset_the_address_counter(self):
+        throttle = auth.LoginThrottle()
+        for round_ in range(3):
+            for index in range(auth.MAX_ADDRESS_FAILURES // 3):
+                throttle.record_failure(f"ajeno{round_}{index}", "10.0.0.7")
+            # Entrar con la cuenta propia no limpia los intentos fallidos de la IP.
+            throttle.record_success("propia", "10.0.0.7")
+        self.assertGreater(throttle.retry_after("otra", "10.0.0.7"), 0)
+
     def test_locks_address_after_many_failures_across_users(self):
         throttle = auth.LoginThrottle()
         for index in range(auth.MAX_ADDRESS_FAILURES):

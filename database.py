@@ -243,6 +243,13 @@ def initialize_db() -> None:
             "outcome TEXT NOT NULL CHECK(outcome IN ('certificate', 'other', 'without_text')), "
             "PRIMARY KEY(root, path))"
         )
+        # Licencias de operación ya revisadas, por tamaño y fecha exactos: la revisión
+        # automática no vuelve a leer las que no cambiaron (ni las escaneadas sin texto).
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS entity_license_import_cache ("
+            "path TEXT PRIMARY KEY, size INTEGER NOT NULL, modified_ns INTEGER NOT NULL, "
+            "outcome TEXT NOT NULL CHECK(outcome IN ('license', 'without_text', 'without_license')))"
+        )
         connection.execute(
             "CREATE TABLE IF NOT EXISTS entity_licenses ("
             "source_path TEXT PRIMARY KEY, created_at TEXT NOT NULL, "

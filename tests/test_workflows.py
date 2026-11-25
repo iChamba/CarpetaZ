@@ -301,14 +301,14 @@ class WorkflowTests(unittest.TestCase):
 
         transition("asignacion_inspector", "evaluacion_inspector", 1, inspector_id=self.admin_id)
         self.assertEqual(deadline(), (at(0), None))
-        transition("evaluacion_inspector", "carga_datos", 10)
+        transition("evaluacion_inspector", "carga_datos", 10, comment="Falta documentación")
         self.assertEqual(deadline(), (at(0), at(10)))
         transition("carga_datos", "evaluacion_inspector", 15, inspector_id=self.admin_id)
         self.assertEqual(deadline(), (at(15), None))
         transition("evaluacion_inspector", "jefe_licenciamiento", 16)
         transition("jefe_licenciamiento", "evaluacion_inspector", 17)
         self.assertEqual(deadline(), (at(15), None))
-        transition("evaluacion_inspector", "carga_datos", 20)
+        transition("evaluacion_inspector", "carga_datos", 20, comment="Falta firma")
         self.assertEqual(deadline(), (at(15), at(20)))
         transition("carga_datos", "evaluacion_inspector", 25, inspector_id=self.admin_id)
         transition("evaluacion_inspector", "rechazado", 28, comment="Motivo")
@@ -927,6 +927,15 @@ class WorkflowTests(unittest.TestCase):
             handler.transition_workflow_case({"case_id": case_id, "transition_id": candidate["id"], **extra})
             self.assertEqual(handler.response[0], 200)
 
+        inspector = WorkflowHandler(users["inspector"])
+        inspector.get_workflow_data({"case_id": [str(case_id)]})
+        observe = next(item["id"] for item in inspector.response[1]["detail"]["transitions"]
+                       if item["to_stage_key"] == "carga_datos")
+        for empty in ("", "   "):
+            with self.subTest(comment=empty), self.assertRaisesRegex(ValueError, "motivo de la observación"):
+                inspector.transition_workflow_case({"case_id": case_id, "transition_id": observe, "comment": empty})
+        with self.assertRaisesRegex(ValueError, "motivo de la observación"):
+            inspector.transition_workflow_case({"case_id": case_id, "transition_id": observe})
         transition(users["inspector"], "carga_datos", comment="Falta información")
         secretary.get_workflow_data({"case_id": [str(case_id)]})
         case = next(item for item in secretary.response[1]["cases"] if item["id"] == case_id)
@@ -1267,7 +1276,9 @@ class WorkflowTests(unittest.TestCase):
             item["id"] for item in inspector.response[1]["detail"]["transitions"]
             if item["to_stage_key"] == "carga_datos"
         )
-        inspector.transition_workflow_case({"case_id": case_id, "transition_id": return_transition})
+        inspector.transition_workflow_case({
+            "case_id": case_id, "transition_id": return_transition, "comment": "Falta información",
+        })
         secretary.get_workflow_data({"case_id": [str(case_id)]})
         case = next(case for case in secretary.response[1]["cases"] if case["id"] == case_id)
         self.assertEqual((case["status"], case["is_observed"]), ("active", 1))

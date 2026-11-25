@@ -34,6 +34,31 @@ export function element(tag, text, className) {
   return node;
 }
 
+export function initials(name) {
+  return String(name || "").split(/\s+/).filter(Boolean).slice(0, 2)
+    .map(part => part[0].toUpperCase()).join("");
+}
+
+export function personChip(name) {
+  const person = element("span", undefined, "inspection-person");
+  const avatar = element("span", initials(name), "inspection-avatar");
+  avatar.setAttribute("aria-hidden", "true");
+  person.append(avatar, element("span", name));
+  return person;
+}
+
+export function historyItem(actor, action, when, notes = []) {
+  const item = element("li", undefined, "workflow-history-item");
+  const head = element("div", undefined, "workflow-history-head");
+  head.append(element("strong", actor), " ");
+  head.append(...(Array.isArray(action) ? action : [action]));
+  item.append(head, element("time", when, "workflow-history-time"));
+  for (const [text, className] of notes) {
+    if (text) item.append(element("p", text, className || "workflow-history-comment"));
+  }
+  return item;
+}
+
 export function makeButton(label, action, className = "button secondary small") {
   const button = element("button", label, className);
   button.type = "button";

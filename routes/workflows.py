@@ -1242,6 +1242,11 @@ class WorkflowRoutes:
                     (case_id, transition["to_stage_id"]),
                 )
             if (is_inspection_workflow
+                    and transition["source_key"] == "evaluacion_inspector"
+                    and transition["stage_key"] == "carga_datos"
+                    and not comment.strip()):
+                raise ValueError("Ingresa el motivo de la observación.")
+            if (is_inspection_workflow
                     and transition["source_key"] == "abogado"
                     and transition["stage_key"] == "evaluacion_inspector"):
                 raise ValueError("Abogado debe devolver el trámite al jefe, no a Inspección.")

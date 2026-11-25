@@ -1837,7 +1837,7 @@ class BulkCertificateImportTests(unittest.TestCase):
                 status = run()
                 self.assertEqual(status["unchanged"], 0)
                 self.assertEqual(status["updated"], 1)
-                with patch.object(records_module, "CERTIFICATE_PARSER_VERSION", 2):
+                with patch.object(records_module, "CERTIFICATE_PARSER_VERSION", 3):
                     self.assertEqual(run()["updated"], 1)
 
 

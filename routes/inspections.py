@@ -131,6 +131,25 @@ def entity_name_or_error(value) -> str:
     raise ValueError("La entidad no existe en «3 Entidades Usuarias» o no está disponible.")
 
 
+def _link_planning_entity(connection, item_id, entity_name, actor_id, now, inspection_id=None):
+    """Asocia la entidad a una fila de planificación sin entidad y sube su versión,
+    para que un editor abierto con la fila vieja no la borre al guardar."""
+    connection.execute(
+        "UPDATE planning_items SET entity_name = ?, version = version + 1, updated_at = ?, "
+        "updated_by = ? WHERE id = ?",
+        (entity_name, now, actor_id, item_id),
+    )
+    if inspection_id is not None:
+        connection.execute(
+            "INSERT INTO planning_events (item_id, actor_id, action, created_at, details) "
+            "VALUES (?, ?, 'edit', ?, ?)",
+            (item_id, actor_id, now, json.dumps(
+                {"entity_name": ["", entity_name], "inspection": f"#{inspection_id}"},
+                ensure_ascii=False,
+            )),
+        )
+
+
 def _user_names(connection, *ids) -> dict:
     wanted = [value for value in ids if value]
     if not wanted:
@@ -272,7 +291,8 @@ class InspectionRoutes:
             if planning_value is not None:
                 planning_row = connection.execute(
                     "SELECT id, COALESCE(manual_institution, sheet_institution) AS institution, "
-                    "COALESCE(manual_practice, sheet_practice) AS practice, entity_name "
+                    "COALESCE(manual_practice, sheet_practice) AS practice, "
+                    "COALESCE(manual_department, sheet_department) AS department, entity_name "
                     "FROM planning_items WHERE id = ?", (planning_value,),
                 ).fetchone()
                 if not planning_row:
@@ -295,14 +315,19 @@ class InspectionRoutes:
             if entity_name:
                 created_details["entity_name"] = entity_name
                 from routes.entity_profiles import fill_profile_from_inspection
-                fill_profile_from_inspection(connection, entity_name, values, inspection_id, user["id"])
+                profile_values = dict(values)
+                if planning_row:
+                    # El departamento de la planilla va al campo Departamento de la ficha.
+                    profile_values["department"] = planning_row["department"]
+                fill_profile_from_inspection(
+                    connection, entity_name, profile_values, inspection_id, user["id"],
+                )
             if planning_row:
+                scheduled = {"inspection": f"#{inspection_id}"}
                 if entity_name and not planning_row["entity_name"]:
                     # La entidad elegida queda asociada también a la fila de planificación.
-                    connection.execute(
-                        "UPDATE planning_items SET entity_name = ? WHERE id = ?",
-                        (entity_name, planning_row["id"]),
-                    )
+                    _link_planning_entity(connection, planning_row["id"], entity_name, user["id"], now)
+                    scheduled["entity_name"] = ["", entity_name]
                 created_details["planning_item"] = (
                     f"{planning_row['institution']} · {planning_row['practice']}"
                 )
@@ -310,7 +335,7 @@ class InspectionRoutes:
                     "INSERT INTO planning_events (item_id, actor_id, action, created_at, details) "
                     "VALUES (?, ?, 'scheduled', ?, ?)",
                     (planning_row["id"], user["id"], now,
-                     json.dumps({"inspection": f"#{inspection_id}"}, ensure_ascii=False)),
+                     json.dumps(scheduled, ensure_ascii=False)),
                 )
             connection.execute(
                 "INSERT INTO inspection_events "
@@ -358,6 +383,8 @@ class InspectionRoutes:
             raise ValueError("La inspección o su versión no es válida.")
         if not isinstance(action, str) or action not in actions:
             raise ValueError("La acción indicada no es válida.")
+        # La entidad se valida antes de bloquear la base: puede recorrer las carpetas.
+        new_entity = entity_name_or_error(data.get("entity_name")) if action == "set_entity" else ""
         connection = connect_db()
         try:
             connection.execute("BEGIN IMMEDIATE")
@@ -393,21 +420,28 @@ class InspectionRoutes:
                     connection, data.get("second_inspector_id"), inspector_id,
                 )
             elif action == "set_second":
+                if not inspection["inspector_id"] and data.get("second_inspector_id") not in (None, "", 0):
+                    raise ValueError("Selecciona primero el inspector líder.")
                 updates["second_inspector_id"] = _optional_second_inspector(
                     connection, data.get("second_inspector_id"), inspection["inspector_id"],
                 )
             elif action == "set_entity":
-                updates["entity_name"] = entity_name_or_error(data.get("entity_name"))
-                if updates["entity_name"]:
+                updates["entity_name"] = new_entity
+                if new_entity:
                     from routes.entity_profiles import fill_profile_from_inspection
                     fill_profile_from_inspection(
-                        connection, updates["entity_name"], inspection, inspection_id, user["id"],
+                        connection, new_entity, inspection, inspection_id, user["id"],
                     )
-                if updates["entity_name"] and inspection["planning_item_id"]:
-                    connection.execute(
-                        "UPDATE planning_items SET entity_name = ? WHERE id = ? AND entity_name = ''",
-                        (updates["entity_name"], inspection["planning_item_id"]),
-                    )
+                if new_entity and inspection["planning_item_id"]:
+                    planning_row = connection.execute(
+                        "SELECT id FROM planning_items WHERE id = ? AND entity_name = ''",
+                        (inspection["planning_item_id"],),
+                    ).fetchone()
+                    if planning_row:
+                        _link_planning_entity(
+                            connection, planning_row["id"], new_entity, user["id"], _now(),
+                            inspection_id,
+                        )
             elif action in ("complete_pre", "complete_post"):
                 updates["pre_checklist" if action == "complete_pre" else "post_checklist"] = _checklist(data)
                 if action == "complete_pre":

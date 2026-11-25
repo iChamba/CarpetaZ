@@ -15,7 +15,7 @@ os.environ.setdefault("APP_DATA_DIR", str(Path(_ENV_ROOT.name) / "appdata"))
 import database
 import inspection_planning
 import settings
-from routes.entity_profiles import EntityProfileRoutes, names_match
+from routes.entity_profiles import EntityProfileRoutes, name_match_kind, names_match
 from routes.inspections import InspectionRoutes
 from routes.planning import PlanningRoutes
 
@@ -98,6 +98,12 @@ class EntityProfileTests(unittest.TestCase):
         self.assertTrue(names_match("Hospital Uno", "Hospital Uno - Sede Centro"))
         self.assertFalse(names_match("COR", "COR Litoral"))
         self.assertFalse(names_match("Otra Empresa", "ANCAP Portland"))
+        # Nombres genéricos no alcanzan; por palabras completas y solo exactos vienen marcados.
+        self.assertEqual(name_match_kind("Sanatorio Americano", "Sanatorio"), "")
+        self.assertEqual(name_match_kind("Centro Médico", "Centro Médico Sur"), "")
+        self.assertEqual(name_match_kind("Hospital Uno", "Hospital Uno - Sede Centro"), "partial")
+        self.assertEqual(name_match_kind("A.N.C.A.P. - PORTLAND", "ANCAP Portland"), "exact")
+        self.assertEqual(name_match_kind("Portland", "ANCAP Portlandia"), "")
 
     def test_profile_is_edited_with_history_and_permissions(self):
         empty = self.record()
@@ -144,10 +150,17 @@ class EntityProfileTests(unittest.TestCase):
 
     def test_equipment_suggested_linked_and_unlinked(self):
         self.call("chief", "get_inspection_planning")
-        record = self.record()
+        # La planificación (equipos y vencimientos) solo la ven Jefe de Inspección y administradores.
+        for user in ("inspector", "secretary"):
+            hidden = self.record(user)
+            self.assertEqual((hidden["equipment"], hidden["suggested_equipment"]), ([], []), user)
+            self.assertFalse(hidden["can_view_equipment"], user)
+        record = self.record("chief")
+        self.assertTrue(record["can_view_equipment"])
         self.assertEqual(record["equipment"], [])
         suggested = record["suggested_equipment"]
         self.assertEqual({item["practice"] for item in suggested}, {"Medidor", "Irradiador"})
+        self.assertEqual({item["match"] for item in suggested}, {"exact"})
         self.assertEqual(suggested[0]["practice"], "Irradiador")
         ids = [item["id"] for item in suggested]
         denied = self.call("inspector", "link_entity_equipment", {"name": "A.N.C.A.P. - PORTLAND", "item_ids": ids})
@@ -164,6 +177,12 @@ class EntityProfileTests(unittest.TestCase):
         self.assertEqual({item["entity_name"] for item in planning if item["id"] in ids}, {"A.N.C.A.P. - PORTLAND"})
         with self.assertRaises(ValueError):
             self.call("chief", "link_entity_equipment", {"name": "Hospital Uno", "item_ids": ids[:1]})
+        # Una acción desconocida no desasocia nada.
+        with self.assertRaises(ValueError):
+            self.call("chief", "link_entity_equipment", {
+                "name": "A.N.C.A.P. - PORTLAND", "item_ids": ids, "action": "borrar",
+            })
+        self.assertEqual(len(self.record("chief")["equipment"]), 2)
         unlinked = self.call("chief", "link_entity_equipment", {
             "name": "A.N.C.A.P. - PORTLAND", "item_ids": ids[:1], "action": "unlink",
         }).response[1]

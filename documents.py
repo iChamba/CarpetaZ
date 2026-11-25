@@ -3,7 +3,6 @@ import os
 import threading
 from contextlib import contextmanager
 from pathlib import Path
-from urllib.parse import unquote
 from zipfile import ZipFile
 from xml.etree import ElementTree
 
@@ -30,7 +29,9 @@ def safe_relative_path(
     if not value or "\x00" in value:
         raise ValueError("Falta la ruta del archivo.")
 
-    relative = Path(unquote(value))
+    # La ruta ya llega decodificada (consulta o JSON): decodificarla otra vez rompe
+    # los nombres que contienen, por ejemplo, «%20».
+    relative = Path(value)
     if relative.is_absolute() or any(part in {"..", ""} for part in relative.parts):
         raise ValueError("La ruta solicitada no es válida.")
 

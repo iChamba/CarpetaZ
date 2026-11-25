@@ -6,6 +6,7 @@ Cierra la aplicación antes de ejecutarlo:
 """
 import argparse
 import os
+import socket
 import sqlite3
 import sys
 from datetime import datetime
@@ -21,13 +22,30 @@ def _size_mb(path: Path) -> float:
     return path.stat().st_size / 1_048_576 if path.exists() else 0.0
 
 
+def _app_is_running(port: int) -> bool:
+    """True si algo responde en el puerto de la aplicación en esta PC."""
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=0.5):
+            return True
+    except OSError:
+        return False
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument(
         "--base",
         default=os.environ.get("APP_DATA_DIR", str(APP_DIR / "appdata")) + "/documentos.sqlite3",
     )
+    parser.add_argument("--puerto", type=int, default=int(os.environ.get("PORT", "8765")))
     args = parser.parse_args(argv)
+    if _app_is_running(args.puerto):
+        print(
+            f"La aplicación parece abierta (responde en el puerto {args.puerto}). "
+            "Ciérrala y vuelve a intentarlo.",
+            file=sys.stderr,
+        )
+        return 1
     database = Path(args.base).expanduser().resolve()
     if not database.is_file():
         print(f"No se encontró la base de datos: {database}", file=sys.stderr)
@@ -45,7 +63,8 @@ def main(argv: list[str] | None = None) -> int:
             print("La base no tiene el índice antiguo de PDF; no hay nada que limpiar.")
             return 0
         try:
-            # Falla si la aplicación (u otro programa) tiene la base abierta escribiendo.
+            # Comprobación extra: falla si otro programa está escribiendo en este momento.
+            # No detecta lectores (con WAL no bloquean); por eso se revisa antes el puerto.
             connection.execute("BEGIN EXCLUSIVE")
             connection.execute("ROLLBACK")
         except sqlite3.OperationalError:

@@ -87,10 +87,12 @@ class LoginThrottle:
                 }
 
     def record_success(self, username: str, address: str) -> None:
-        user_key, address_key = self._keys(username, address)
+        # Solo se limpia el contador de la cuenta: si se limpiara el de la IP, alguien
+        # con cuenta podría entrar cada tanto con la suya y seguir probando contraseñas
+        # ajenas desde la misma IP sin que se bloquee.
+        user_key, _address_key = self._keys(username, address)
         with self._lock:
             self._failures.pop(user_key, None)
-            self._failures.pop(address_key, None)
             self._locked_until.pop(user_key, None)
 
 

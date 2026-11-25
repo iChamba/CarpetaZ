@@ -119,6 +119,71 @@ class IncrementalLicenseTests(DatabaseTestCase):
         self.assertFalse(entities_module._license_is_current("LO vieja.pdf", path))
 
 
+class LicenseImportCacheTests(DatabaseTestCase):
+    """La revisión automática compara tamaño y fecha exactos de cada licencia."""
+
+    def setUp(self):
+        super().setUp()
+        self.area = self.root / "Radioterapia" / "CENTRO PRUEBA"
+        self.folder = self.area / "1. Autorización"
+        self.folder.mkdir(parents=True)
+        (self.area / "2. Inspecciones").mkdir()
+        self.reads = []
+
+    def extract(self, path):
+        self.reads.append(path.name)
+        return path.read_text(encoding="utf-8"), []
+
+    def run_import(self):
+        with patch.object(entities_module, "ENTITY_ROOT", self.root), patch.object(
+            entities_module, "_extract_license_content", side_effect=self.extract
+        ):
+            self.reads.clear()
+            self.assertTrue(entities_module.run_entity_import_now(incremental=True))
+            with entities_module.ENTITY_IMPORT_STATE_LOCK:
+                return dict(entities_module.ENTITY_IMPORT_STATE)
+
+    def test_scanned_license_is_not_read_again_until_it_changes(self):
+        scanned = self.folder / "LO escaneada.txt"
+        scanned.write_text("   ", encoding="utf-8")
+        self.assertEqual(self.run_import()["without_text"], 1)
+        self.assertEqual(self.reads, ["LO escaneada.txt"])
+        status = self.run_import()
+        self.assertEqual(self.reads, [])
+        self.assertEqual((status["unchanged"], status["without_text"]), (1, 1))
+        scanned.write_text("Licencia LO-X-1234-5678-AB", encoding="utf-8")
+        self.assertEqual(self.run_import()["imported"], 1)
+
+    def test_replaced_license_with_old_date_is_read_again(self):
+        path = self.folder / "LO vigente.txt"
+        path.write_text("Licencia LO-X-1234-5678-AB", encoding="utf-8")
+        old = (datetime.now() - timedelta(days=30)).timestamp()
+        os.utime(path, (old, old))
+        self.assertEqual(self.run_import()["imported"], 1)
+        self.assertEqual(self.run_import()["unchanged"], 1)
+        # Copia corregida con fecha de modificación vieja: antes se ignoraba.
+        path.write_text("Licencia corregida LO-Y-1234-5678-CD", encoding="utf-8")
+        os.utime(path, (old - 3600, old - 3600))
+        status = self.run_import()
+        self.assertEqual((status["updated"], self.reads), (1, ["LO vigente.txt"]))
+        connection = database.connect_db()
+        try:
+            row = connection.execute("SELECT license_number FROM entity_licenses").fetchone()
+        finally:
+            connection.close()
+        self.assertEqual(row["license_number"], "LO-Y-1234-5678-CD")
+
+    def test_licenses_processed_before_the_cache_existed_are_not_reread(self):
+        path = self.folder / "LO anterior.txt"
+        path.write_text("Licencia LO-X-1234-5678-AB", encoding="utf-8")
+        earlier = (datetime.now() - timedelta(minutes=5)).timestamp()
+        os.utime(path, (earlier, earlier))
+        entities_module._save_license("Radioterapia/CENTRO PRUEBA/1. Autorización/LO anterior.txt",
+                                      "LO-X-1234-5678-AB", {}, [])
+        status = self.run_import()
+        self.assertEqual((status["unchanged"], self.reads), (1, []))
+
+
 class AutoRefreshTests(unittest.TestCase):
     def test_cycle_runs_catalog_then_imports_in_order(self):
         calls = []

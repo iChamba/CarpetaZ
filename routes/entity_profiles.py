@@ -23,8 +23,9 @@ PROFILE_LABELS = {
     "phone": "Teléfono", "email": "Email", "contact_details": "Datos de contacto",
     "notes": "Notas", "equipment": "Equipos",
 }
-# Datos de la inspección que completan la ficha (mismo nombre en ambos lados).
-FROM_INSPECTION = ("rut", "address", "city", "phone", "email", "contact_details")
+# Datos de la inspección que completan la ficha (mismo nombre en ambos lados). El
+# departamento llega solo cuando la inspección se agenda desde la planificación.
+FROM_INSPECTION = ("rut", "address", "city", "department", "phone", "email", "contact_details")
 ACTION_LABELS = {
     "edit": "Ficha editada", "from_inspection": "Completada desde una inspección",
     "link_equipment": "Equipos asociados", "unlink_equipment": "Equipos desasociados",
@@ -39,15 +40,46 @@ def _compact(value) -> str:
     return re.sub(r"[^a-z0-9]", "", normalize(value))
 
 
-def names_match(entity: str, institution: str) -> bool:
-    """Coincidencia para sugerir equipos: igual sin puntuación, o uno contiene al otro."""
+# Palabras que no alcanzan para decir que dos nombres son la misma institución.
+STOPWORDS = {"de", "del", "la", "las", "el", "los", "y", "e", "en", "sa", "srl", "ltda"}
+GENERIC_WORDS = {
+    "sanatorio", "hospital", "clinica", "policlinica", "policlinico", "centro", "medico",
+    "medica", "laboratorio", "servicio", "servicios", "instituto", "asociacion",
+    "cooperativa", "mutualista", "odontologia", "odontologico", "radiologia",
+    "radiologico", "diagnostico", "sede", "sucursal", "empresa", "industria",
+}
+
+
+def _words(value) -> list[str]:
+    return [word for word in re.split(r"[^a-z0-9]+", normalize(value)) if word]
+
+
+def _contains(longer: list[str], shorter: list[str]) -> bool:
+    size = len(shorter)
+    return any(longer[index:index + size] == shorter for index in range(len(longer) - size + 1))
+
+
+def name_match_kind(entity: str, institution: str) -> str:
+    """"exact" si son el mismo nombre sin puntuación, "partial" si uno contiene al
+    otro por palabras completas y con nombre propio suficiente, "" si no coinciden."""
     a, b = _compact(entity), _compact(institution)
     if not a or not b:
-        return False
+        return ""
     if a == b:
-        return True
-    shorter, longer = sorted((a, b), key=len)
-    return len(shorter) >= 6 and shorter in longer
+        return "exact"
+    shorter, longer = sorted((_words(entity), _words(institution)), key=len)
+    if not shorter or not _contains(longer, shorter) or len("".join(shorter)) < 6:
+        return ""
+    proper = [word for word in shorter if word not in STOPWORDS and word not in GENERIC_WORDS]
+    # «Hospital» o «Centro Médico» solos son demasiado genéricos.
+    if not proper or (len(shorter) == 1 and len(shorter[0]) < 6):
+        return ""
+    return "partial"
+
+
+def names_match(entity: str, institution: str) -> bool:
+    """Coincidencia para sugerir equipos: igual sin puntuación, o uno contiene al otro."""
+    return bool(name_match_kind(entity, institution))
 
 
 def _profile_row(connection, entity_name, create=False, now=None):
@@ -147,12 +179,16 @@ class EntityProfileRoutes:
             ]
         key = _entity_name_key(entity_name)
         equipment, suggested = [], []
-        for item in _planning_rows(connection, today):
+        # Los equipos salen de la planificación, que solo ven Jefe de Inspección y administradores.
+        can_view_equipment = _is_chief(self.current_user)
+        for item in _planning_rows(connection, today) if can_view_equipment else ():
             if item["entity_name"]:
                 if _entity_name_key(item["entity_name"]) == key:
                     equipment.append(item)
-            elif names_match(entity_name, item["institution"]):
-                suggested.append(item)
+            else:
+                item["match"] = name_match_kind(entity_name, item["institution"])
+                if item["match"]:
+                    suggested.append(item)
         order = lambda item: (item["next_inspection"] or "9999", normalize(item["practice"]))
         equipment.sort(key=order)
         suggested.sort(key=order)
@@ -167,7 +203,8 @@ class EntityProfileRoutes:
             "equipment": equipment,
             "suggested_equipment": suggested,
             "can_edit": _can_manage(self.current_user),
-            "can_link": _is_chief(self.current_user),
+            "can_view_equipment": can_view_equipment,
+            "can_link": can_view_equipment,
             "today": today.isoformat(),
         })
 
@@ -236,7 +273,10 @@ class EntityProfileRoutes:
             )
         entity_name = entity_name_or_error(data.get("name"))
         item_ids = data.get("item_ids")
-        link = data.get("action", "link") == "link"
+        action = data.get("action", "link")
+        if action not in ("link", "unlink"):
+            raise ValueError("La acción indicada no es válida.")
+        link = action == "link"
         if (not entity_name or not isinstance(item_ids, list) or not item_ids
                 or len(item_ids) > 500 or any(type(item) is not int for item in item_ids)):
             raise ValueError("Selecciona los equipos a asociar.")
