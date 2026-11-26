@@ -16,6 +16,7 @@
     <div class="topbar-right">
       <div class="workflow-session">
         <span id="workflow-current-user"></span>
+        <button type="button" class="button secondary" id="settings-open" aria-label="Configuración" title="Configuración"><span aria-hidden="true">⚙</span> Configuración</button>
         <button type="button" class="button secondary" id="workflow-logout">Cerrar sesión</button>
       </div>
       <div class="notice" id="session-message" role="status"></div>
@@ -32,6 +33,22 @@
   </nav>
 
   <main>
+    <section class="pane" id="pane-settings">
+      <div class="section-heading">
+        <div><h2>Configuración</h2><p>Ajustes de tu cuenta.</p></div>
+      </div>
+      <section class="workflow-create-panel settings-panel">
+        <h3>Cambiar contraseña</h3>
+        <form id="password-form" class="workflow-form">
+          <label>Contraseña actual<input name="current_password" type="password" autocomplete="current-password" maxlength="256" required></label>
+          <label>Nueva contraseña (mínimo 12 caracteres)<input name="new_password" type="password" autocomplete="new-password" minlength="12" maxlength="256" required></label>
+          <label>Repetir nueva contraseña<input name="confirm_password" type="password" autocomplete="new-password" minlength="12" maxlength="256" required></label>
+          <button type="submit" class="button workflow-approve">Guardar contraseña</button>
+        </form>
+        <div class="notice" id="password-message" role="status"></div>
+      </section>
+    </section>
+
     <section class="pane" id="pane-inspections">
       <div class="section-heading">
         <div><h2>Mis Inspecciones</h2><p>Consulta las inspecciones y su calendario.</p></div>
@@ -42,6 +59,7 @@
         <button type="button" class="workflow-case-tab" data-inspection-view="list" aria-pressed="true">Inspecciones</button>
         <button type="button" class="workflow-case-tab" data-inspection-view="planning" aria-pressed="false">Planificación de inspección</button>
       </div>
+      <section id="inspection-driver-tasks" class="workflow-create-panel hidden" aria-live="polite"></section>
       <div id="inspection-main">
       <details class="workflow-create-panel hidden" id="inspection-create-panel">
         <summary>Nueva Inspección</summary>
@@ -75,6 +93,10 @@
         <div class="inspection-column">
           <section class="inspection-list">
             <div class="inspection-section-heading"><h3>Inspecciones</h3><span class="inspection-count" id="inspection-count"></span></div>
+            <div class="workflow-case-tabs" id="inspection-list-filter" role="group" aria-label="Filtrar inspecciones">
+              <button type="button" class="workflow-case-tab" data-inspection-filter="active" aria-pressed="true">En curso</button>
+              <button type="button" class="workflow-case-tab" data-inspection-filter="completed" aria-pressed="false">Finalizadas (de todos)</button>
+            </div>
             <div class="table-wrap">
               <table class="workflow-table">
                 <thead><tr><th>Institución</th><th>Tipo de solicitud</th><th>Práctica</th><th>Inspector líder</th><th>Segundo inspector</th><th>Etapa</th></tr></thead>
@@ -380,6 +402,7 @@
                 <option value="administracion">Secretaría</option>
                 <option value="inspeccion">Inspección</option>
                 <option value="jefe_inspeccion">Jefe de Inspección</option>
+                <option value="coordinacion">Coordinación</option>
                 <option value="jefe_licenciamiento">Jefe de Licenciamiento</option>
                 <option value="abogado">Abogado</option>
                 <option value="director">Director</option>

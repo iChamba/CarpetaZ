@@ -38,7 +38,15 @@ FIELD_LABELS = {
     "scheduled_date": "Fecha de inspección",
     "scheduled_time": "Hora de inspección", "scheduled_place": "Lugar de inspección",
     "pre_checklist": "Checklist previo", "post_checklist": "Checklist posterior",
+    "locomotion": "Locomoción",
+    "driver_status": "Chofer", "driver_name": "Chofer asignado",
+    "departure_time": "Hora de salida", "arrival_time": "Hora aprox. de llegada",
 }
+DRIVER_STATUS = {"pending": "Pendiente de coordinar", "coordinated": "Chofer coordinado"}
+LOCOMOTION_OPTIONS = {"auto_miem": "Auto MIEM", "taxi": "Taxi", "propios": "Medios propios"}
+PRE_CHECKLIST_ITEMS = ("Coordinar inspección con el usuario", "Locomoción", "Preparar documentación")
+PRE_CHECKLIST_SIZE = len(PRE_CHECKLIST_ITEMS)
+POST_CHECKLIST_SIZE = 6
 STAGE_LABELS = {
     "assignment": "Asignación de inspector",
     "pre_inspection": "Checklist previo y agenda",
@@ -54,6 +62,9 @@ ACTION_LABELS = {
     "return_post": "Devuelto para corrección", "approve": "Revisión aprobada",
     "send": "Envío registrado",
     "set_second": "Segundo inspector actualizado", "set_entity": "Entidad actualizada",
+    "save_checklist": "Checklist guardado",
+    "coordinate_driver": "Chofer coordinado",
+    "reschedule": "Inspección re-coordinada",
 }
 REQUEST_TYPES = {"inicial": "Autorización inicial", "renovacion": "Renovación"}
 
@@ -70,6 +81,10 @@ def _display(key: str, value) -> str:
         return _checklist_summary(value)
     if key == "request_type":
         return REQUEST_TYPES.get(value, value or "")
+    if key == "locomotion":
+        return LOCOMOTION_OPTIONS.get(value, value or "")
+    if key == "driver_status":
+        return DRIVER_STATUS.get(value, value or "")
     return "" if value is None else str(value)
 
 
@@ -91,6 +106,54 @@ def _can_manage(user):
     return user["role"] == "admin" or user.get("workflow_role") in {
         "administracion", "jefe_inspeccion",
     }
+
+
+def _is_coordinator(user):
+    return user.get("workflow_role") == "coordinacion"
+
+
+def _travel_time(data, key, label):
+    value = data.get(key, "")
+    if value == "":
+        return ""
+    try:
+        if not isinstance(value, str) or not re.fullmatch(r"\d{2}:\d{2}", value):
+            raise ValueError
+        time.fromisoformat(value)
+    except ValueError:
+        raise ValueError(f"Ingresa una {label} válida.") from None
+    return value
+
+
+def _schedule(data):
+    scheduled_date = data.get("scheduled_date")
+    scheduled_time = data.get("scheduled_time")
+    place = data.get("scheduled_place")
+    try:
+        if not isinstance(scheduled_date, str) or date.fromisoformat(scheduled_date).isoformat() != scheduled_date:
+            raise ValueError
+        if not isinstance(scheduled_time, str) or not re.fullmatch(r"\d{2}:\d{2}", scheduled_time):
+            raise ValueError
+        time.fromisoformat(scheduled_time)
+    except ValueError:
+        raise ValueError("Ingresa una fecha y hora válidas para la inspección.") from None
+    if not isinstance(place, str) or not 1 <= len(place.strip()) <= 255:
+        raise ValueError("Ingresa el lugar de la inspección (máximo 255 caracteres).")
+    return {"scheduled_date": scheduled_date, "scheduled_time": scheduled_time,
+            "scheduled_place": place.strip()}
+
+
+def _driver_updates(inspection, locomotion, data):
+    """Auto MIEM genera la tarea de coordinar chofer; otro medio la quita. No frena la inspección."""
+    if locomotion == "auto_miem":
+        updates = {
+            "departure_time": _travel_time(data, "departure_time", "hora de salida"),
+            "arrival_time": _travel_time(data, "arrival_time", "hora aproximada de llegada"),
+        }
+        if not inspection["driver_status"]:
+            updates["driver_status"] = "pending"
+        return updates
+    return {"driver_status": "", "driver_name": "", "departure_time": "", "arrival_time": ""}
 
 
 def _is_chief(user):
@@ -160,9 +223,17 @@ def _user_names(connection, *ids) -> dict:
     ).fetchall())
 
 
+def _list_visibility(user):
+    """Como _visibility, pero las inspecciones finalizadas (enviadas) las ven todos."""
+    where, params = _visibility(user)
+    if not where:
+        return where, params
+    return where[:-1] + " OR inspections.stage = 'completed')", params
+
+
 def _visibility(user):
     """Filtro SQL: quien gestiona ve todas; cada inspector, las suyas como líder o segundo."""
-    if _can_manage(user):
+    if _can_manage(user) or _is_coordinator(user):
         return "", ()
     return (
         " WHERE (inspections.inspector_id = ? OR inspections.second_inspector_id = ?)",
@@ -174,11 +245,18 @@ def _now():
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
-def _checklist(data):
+def _checklist(data, size):
     value = data.get("checklist")
-    if not isinstance(value, list) or len(value) != 6 or any(type(item) is not bool for item in value):
-        raise ValueError("El checklist debe contener seis casillas.")
+    if not isinstance(value, list) or len(value) != size or any(type(item) is not bool for item in value):
+        raise ValueError(f"El checklist debe contener {size} casillas.")
     return json.dumps(value)
+
+
+def _locomotion(data):
+    value = data.get("locomotion", "")
+    if value not in ("", *LOCOMOTION_OPTIONS):
+        raise ValueError("El medio de locomoción no es válido.")
+    return value
 
 
 class InspectionRoutes:
@@ -186,7 +264,7 @@ class InspectionRoutes:
         connection = connect_db()
         try:
             managers = _can_manage(self.current_user)
-            where, params = _visibility(self.current_user)
+            where, params = _list_visibility(self.current_user)
             inspections = [
                 dict(row) for row in connection.execute(
                     "SELECT inspections.*, users.display_name AS inspector_name, "
@@ -223,9 +301,24 @@ class InspectionRoutes:
                     item = dict(event)
                     item["details_text"] = details_text(item.pop("details") or "{}")
                     by_id[event["inspection_id"]]["events"].append(item)
+            # Calendario: todos ven todas las inspecciones agendadas, con datos básicos.
+            calendar = [
+                dict(row) for row in connection.execute(
+                    "SELECT inspections.id, inspections.company_name, inspections.case_number, "
+                    "inspections.stage, inspections.scheduled_date, inspections.scheduled_time, "
+                    "inspections.scheduled_place, users.display_name AS inspector_name, "
+                    "second.display_name AS second_inspector_name "
+                    "FROM inspections LEFT JOIN workflow_users AS users "
+                    "ON users.id = inspections.inspector_id "
+                    "LEFT JOIN workflow_users AS second ON second.id = inspections.second_inspector_id "
+                    "WHERE inspections.scheduled_date != '' ORDER BY inspections.scheduled_date, "
+                    "inspections.scheduled_time"
+                )
+            ]
             self.send_json({
                 "current_user": self.current_user,
                 "can_create": managers,
+                "calendar": calendar,
                 "inspectors": inspectors,
                 "inspections": inspections,
             })
@@ -378,6 +471,12 @@ class InspectionRoutes:
             "set_second": (None, None, "chief"),
             # Asocia o cambia la entidad usuaria; no mueve la etapa.
             "set_entity": (None, None, "manager"),
+            # Guarda las casillas marcadas del checklist en curso; no mueve la etapa.
+            "save_checklist": (None, None, "inspector"),
+            # Coordinación confirma el chofer del Auto MIEM; no mueve la etapa.
+            "coordinate_driver": (None, None, "coordinator"),
+            # El inspector cambia fecha, hora o lugar de una inspección ya agendada; no mueve la etapa.
+            "reschedule": (None, None, "inspector"),
         }
         if type(inspection_id) is not int or inspection_id <= 0 or type(version) is not int or version < 0:
             raise ValueError("La inspección o su versión no es válida.")
@@ -400,6 +499,8 @@ class InspectionRoutes:
                 user["role"] == "admin" or
                 (user.get("workflow_role") == "inspeccion" and inspection["inspector_id"] == user["id"])
             )
+            if required_role == "coordinator":
+                permitted = user["role"] == "admin" or _is_coordinator(user)
             if not permitted:
                 return self.send_error_json("No tienes permiso para realizar esta acción.", 403)
             if action == "set_second":
@@ -408,12 +509,55 @@ class InspectionRoutes:
                 source = target = inspection["stage"]
             if action == "set_entity":
                 source = target = inspection["stage"]
+            if action == "reschedule":
+                if inspection["stage"] not in ("post_inspection", "chief_review", "send"):
+                    raise ValueError("Solo se puede re-coordinar una inspección agendada y no enviada.")
+                source = target = inspection["stage"]
+            if action == "coordinate_driver":
+                if inspection["driver_status"] not in ("pending", "coordinated"):
+                    raise ValueError("Esta inspección no tiene un chofer por coordinar.")
+                source = target = inspection["stage"]
+            if action == "save_checklist":
+                if inspection["stage"] not in ("pre_inspection", "post_inspection"):
+                    raise ValueError("El checklist no se puede modificar en esta etapa.")
+                source = target = inspection["stage"]
             if inspection["stage"] != source or inspection["version"] != version:
                 return self.send_error_json("La inspección cambió; actualiza e inténtalo nuevamente.", 409)
 
             updates = {"stage": target}
             comment = ""
-            if action == "assign":
+            if action == "save_checklist":
+                if target == "pre_inspection":
+                    updates["pre_checklist"] = _checklist(data, PRE_CHECKLIST_SIZE)
+                    updates["locomotion"] = _locomotion(data)
+                    updates.update(_driver_updates(inspection, updates["locomotion"], data))
+                else:
+                    updates["post_checklist"] = _checklist(data, POST_CHECKLIST_SIZE)
+                if all(inspection[key] == value for key, value in updates.items()):
+                    connection.rollback()
+                    return self.send_json({"id": inspection_id, "stage": target, "version": version})
+            elif action == "reschedule":
+                updates.update(_schedule(data))
+                if inspection["locomotion"] == "auto_miem":
+                    updates.update(
+                        departure_time=_travel_time(data, "departure_time", "hora de salida"),
+                        arrival_time=_travel_time(data, "arrival_time", "hora aproximada de llegada"),
+                    )
+                if all(inspection[key] == value for key, value in updates.items()):
+                    raise ValueError("No cambiaste la fecha, la hora ni el lugar.")
+                # Con Auto MIEM, Coordinación tiene que volver a confirmar el chofer.
+                if inspection["driver_status"] == "coordinated":
+                    updates["driver_status"] = "pending"
+                comment = data.get("comment", "")
+                if not isinstance(comment, str) or len(comment.strip()) > 1000:
+                    raise ValueError("El motivo debe tener hasta 1000 caracteres.")
+                comment = comment.strip()
+            elif action == "coordinate_driver":
+                driver = data.get("driver_name")
+                if not isinstance(driver, str) or not 1 <= len(driver.strip()) <= 120:
+                    raise ValueError("Indica qué chofer viene (máximo 120 caracteres).")
+                updates.update(driver_status="coordinated", driver_name=driver.strip())
+            elif action == "assign":
                 inspector_id = _active_inspector(connection, data.get("inspector_id"), "inspector")
                 updates["inspector_id"] = inspector_id
                 updates["second_inspector_id"] = _optional_second_inspector(
@@ -443,22 +587,20 @@ class InspectionRoutes:
                             inspection_id,
                         )
             elif action in ("complete_pre", "complete_post"):
-                updates["pre_checklist" if action == "complete_pre" else "post_checklist"] = _checklist(data)
                 if action == "complete_pre":
-                    scheduled_date = data.get("scheduled_date")
-                    scheduled_time = data.get("scheduled_time")
-                    place = data.get("scheduled_place")
-                    try:
-                        if not isinstance(scheduled_date, str) or date.fromisoformat(scheduled_date).isoformat() != scheduled_date:
-                            raise ValueError
-                        if not isinstance(scheduled_time, str) or not re.fullmatch(r"\d{2}:\d{2}", scheduled_time):
-                            raise ValueError
-                        time.fromisoformat(scheduled_time)
-                    except ValueError:
-                        raise ValueError("Ingresa una fecha y hora válidas para la inspección.") from None
-                    if not isinstance(place, str) or not 1 <= len(place.strip()) <= 255:
-                        raise ValueError("Ingresa el lugar de la inspección (máximo 255 caracteres).")
-                    updates.update(scheduled_date=scheduled_date, scheduled_time=scheduled_time, scheduled_place=place.strip())
+                    updates["pre_checklist"] = _checklist(data, PRE_CHECKLIST_SIZE)
+                    updates["locomotion"] = _locomotion(data)
+                    updates.update(_driver_updates(inspection, updates["locomotion"], data))
+                else:
+                    updates["post_checklist"] = _checklist(data, POST_CHECKLIST_SIZE)
+                if action == "complete_pre":
+                    missing = [f"marcar «{name}»" for name, done in zip(PRE_CHECKLIST_ITEMS, json.loads(updates["pre_checklist"]))
+                               if not done]
+                    if not updates["locomotion"]:
+                        missing.append("elegir el medio de locomoción")
+                    if missing:
+                        raise ValueError("Para agendar falta: " + "; ".join(missing) + ".")
+                    updates.update(_schedule(data))
             elif action in ("return_post", "approve"):
                 comment = data.get("comment", "")
                 if not isinstance(comment, str) or len(comment.strip()) > 1000:
@@ -491,7 +633,7 @@ class InspectionRoutes:
                  json.dumps(changes, ensure_ascii=False)),
             )
             connection.commit()
-            self.send_json({"id": inspection_id, "stage": target})
+            self.send_json({"id": inspection_id, "stage": target, "version": version + 1})
         finally:
             connection.close()
 
@@ -526,7 +668,10 @@ class InspectionRoutes:
             ("Inspector líder", "inspector_name"), ("Segundo inspector", "second_inspector_name"),
             ("Fecha de inspección", "scheduled_date"),
             ("Hora de inspección", "scheduled_time"), ("Lugar de inspección", "scheduled_place"),
-            ("Checklist previo", "pre_checklist"), ("Checklist posterior", "post_checklist"),
+            ("Checklist previo", "pre_checklist"), ("Locomoción", "locomotion"),
+            ("Chofer", "driver_status"), ("Chofer asignado", "driver_name"),
+            ("Hora de salida", "departure_time"), ("Hora aprox. de llegada", "arrival_time"),
+            ("Checklist posterior", "post_checklist"),
             ("Creada por", "created_by_name"), ("Creada (UTC)", "created_at"),
             ("Última modificación (UTC)", "updated_at"),
         ]
@@ -544,6 +689,8 @@ class InspectionRoutes:
             values["request_type"] = REQUEST_TYPES.get(values["request_type"], values["request_type"])
             values["pre_checklist"] = _checklist_summary(values["pre_checklist"])
             values["post_checklist"] = _checklist_summary(values["post_checklist"])
+            values["locomotion"] = LOCOMOTION_OPTIONS.get(values["locomotion"], values["locomotion"])
+            values["driver_status"] = DRIVER_STATUS.get(values["driver_status"], values["driver_status"])
             return values
 
         def event_values(row):

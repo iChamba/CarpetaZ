@@ -50,6 +50,7 @@ class InspectionTests(unittest.TestCase):
             ("secretary", "administracion"), ("chief", "jefe_inspeccion"),
             ("inspector", "inspeccion"), ("other", "inspeccion"),
             ("lawyer", "abogado"), ("inactive", "inspeccion"), ("admin", ""),
+            ("coordinator", "coordinacion"),
         ):
             account_role = "admin" if name == "admin" else "user"
             cursor = connection.execute(
@@ -94,8 +95,8 @@ class InspectionTests(unittest.TestCase):
         self.assertEqual(self.act("secretary", inspection_id, 0, "assign", inspector_id=self.users["inspector"]["id"])[0], 403)
         self.assertEqual(self.act("chief", inspection_id, 0, "assign", inspector_id=self.users["inspector"]["id"])[0], 200)
         self.assertEqual(self.act("other", inspection_id, 1, "complete_pre")[0], 403)
-        pre = [True, False, True, False, True, False]
-        self.assertEqual(self.act("inspector", inspection_id, 1, "complete_pre", checklist=pre,
+        pre = [True, True, True]
+        self.assertEqual(self.act("inspector", inspection_id, 1, "complete_pre", checklist=pre, locomotion="taxi",
                                   scheduled_date="2026-11-24", scheduled_time="09:30",
                                   scheduled_place="Centro")[0], 200)
         for name in ("secretary", "chief", "inspector", "admin"):
@@ -125,6 +126,135 @@ class InspectionTests(unittest.TestCase):
         self.assertEqual(result["events"][4]["comment"], "Corregir ítem")
         self.assertEqual(result["events"][-1]["actor_name"], "inspector")
 
+    def test_checklist_items_are_saved_without_changing_stage(self):
+        inspection_id = self.create()
+        self.act("chief", inspection_id, 0, "assign", inspector_id=self.users["inspector"]["id"])
+        partial = [True, False, True]
+        self.assertEqual(self.act("other", inspection_id, 1, "save_checklist", checklist=partial)[0], 403)
+        status, payload = self.act("inspector", inspection_id, 1, "save_checklist", checklist=partial)
+        self.assertEqual((status, payload["version"]), (200, 2))
+        saved = self.data("inspector")["inspections"][0]
+        self.assertEqual((saved["stage"], saved["pre_checklist"], saved["version"]),
+                         ("pre_inspection", partial, 2))
+        # Guardar lo mismo no genera una versión nueva.
+        self.assertEqual(self.act("inspector", inspection_id, 2, "save_checklist", checklist=partial)[1]["version"], 2)
+        self.assertEqual(self.act("inspector", inspection_id, 1, "save_checklist", checklist=[True] * 3)[0], 409)
+        with self.assertRaises(ValueError):
+            self.act("inspector", inspection_id, 2, "save_checklist", checklist=partial, locomotion="avion")
+        self.assertEqual(self.act("inspector", inspection_id, 2, "save_checklist", checklist=partial,
+                                  locomotion="taxi")[0], 200)
+        self.assertEqual(self.data("inspector")["inspections"][0]["locomotion"], "taxi")
+        # Con casillas sin marcar no deja agendar.
+        with self.assertRaises(ValueError):
+            self.act("inspector", inspection_id, 3, "complete_pre", checklist=partial, locomotion="taxi",
+                     scheduled_date="2026-11-24", scheduled_time="09:30", scheduled_place="Centro")
+        self.act("inspector", inspection_id, 3, "complete_pre", checklist=[True] * 3, locomotion="taxi",
+                 scheduled_date="2026-11-24", scheduled_time="09:30", scheduled_place="Centro")
+        self.assertEqual(self.act("inspector", inspection_id, 4, "save_checklist", checklist=[True] * 6)[0], 200)
+        saved = self.data("inspector")["inspections"][0]
+        self.assertEqual((saved["pre_checklist"], saved["post_checklist"]), ([True] * 3, [True] * 6))
+
+    def test_auto_miem_creates_driver_task_without_blocking(self):
+        inspection_id = self.create()
+        self.create()  # otra inspección de otro inspector: Coordinación también la ve
+        self.act("chief", inspection_id, 0, "assign", inspector_id=self.users["inspector"]["id"])
+        self.assertEqual(len(self.data("coordinator")["inspections"]), 2)
+        self.assertFalse(self.data("coordinator")["can_create"])
+        with self.assertRaises(ValueError):
+            self.act("coordinator", inspection_id, 1, "coordinate_driver", driver_name="Juan")
+        self.act("inspector", inspection_id, 1, "save_checklist", checklist=[False] * 3, locomotion="auto_miem")
+        seen = next(i for i in self.data("coordinator")["inspections"] if i["id"] == inspection_id)
+        self.assertEqual(seen["driver_status"], "pending")
+        # La inspección sigue avanzando aunque el chofer no esté coordinado.
+        self.assertEqual(self.act("inspector", inspection_id, 2, "complete_pre", checklist=[True] * 3,
+                                  locomotion="auto_miem", scheduled_date="2026-12-01",
+                                  scheduled_time="10:00", scheduled_place="Sala 1")[0], 200)
+        self.assertEqual(self.act("inspector", inspection_id, 3, "coordinate_driver", driver_name="Juan")[0], 403)
+        with self.assertRaises(ValueError):
+            self.act("coordinator", inspection_id, 3, "coordinate_driver", driver_name=" ")
+        self.assertEqual(self.act("coordinator", inspection_id, 3, "coordinate_driver",
+                                  driver_name=" Juan Pérez ")[0], 200)
+        mine = self.data("inspector")["inspections"][0]
+        self.assertEqual((mine["stage"], mine["driver_status"], mine["driver_name"]),
+                         ("post_inspection", "coordinated", "Juan Pérez"))
+        self.assertIn("Chofer: Pendiente de coordinar → Chofer coordinado", mine["events"][-1]["details_text"])
+        # Coordinación no puede mover las etapas de la inspección.
+        self.assertEqual(self.act("coordinator", inspection_id, 4, "complete_post", checklist=[True] * 6)[0], 403)
+
+    def test_auto_miem_travel_times_are_saved_and_cleared(self):
+        inspection_id = self.create()
+        self.act("chief", inspection_id, 0, "assign", inspector_id=self.users["inspector"]["id"])
+        with self.assertRaises(ValueError):
+            self.act("inspector", inspection_id, 1, "save_checklist", checklist=[False] * 3,
+                     locomotion="auto_miem", departure_time="25:00")
+        self.act("inspector", inspection_id, 1, "save_checklist", checklist=[False] * 3,
+                 locomotion="auto_miem", departure_time="08:15", arrival_time="09:00")
+        seen = self.data("coordinator")["inspections"][0]
+        self.assertEqual((seen["driver_status"], seen["departure_time"], seen["arrival_time"]),
+                         ("pending", "08:15", "09:00"))
+        self.act("inspector", inspection_id, 2, "save_checklist", checklist=[False] * 3, locomotion="propios")
+        seen = self.data("coordinator")["inspections"][0]
+        self.assertEqual((seen["departure_time"], seen["arrival_time"]), ("", ""))
+
+    def test_every_inspector_sees_full_calendar_but_only_own_list(self):
+        mine = self.create()
+        theirs = self.create()
+        self.create()  # sin agendar: no aparece en el calendario
+        for inspection_id, name in ((mine, "inspector"), (theirs, "other")):
+            self.act("chief", inspection_id, 0, "assign", inspector_id=self.users[name]["id"])
+            self.act(name, inspection_id, 1, "complete_pre", checklist=[True] * 3, locomotion="taxi",
+                     scheduled_date="2026-12-01", scheduled_time="10:00", scheduled_place="Sala")
+        seen = self.data("inspector")
+        self.assertEqual([item["id"] for item in seen["inspections"]], [mine])
+        self.assertEqual(sorted(item["id"] for item in seen["calendar"]), sorted([mine, theirs]))
+        other = next(item for item in seen["calendar"] if item["id"] == theirs)
+        self.assertEqual(other["inspector_name"], "other")
+        self.assertNotIn("events", other)
+
+    def test_finished_inspections_are_visible_to_everyone(self):
+        inspection_id = self.run_full_flow()
+        in_progress = self.create()
+        self.act("chief", in_progress, 0, "assign", inspector_id=self.users["inspector"]["id"])
+        self.assertEqual(self.data("other")["inspections"], [])
+        self.act("chief", inspection_id, 5, "approve")
+        self.act("inspector", inspection_id, 6, "send")
+        seen = self.data("other")["inspections"]
+        self.assertEqual([(item["id"], item["stage"]) for item in seen], [(inspection_id, "completed")])
+        self.assertTrue(seen[0]["events"])
+        self.assertEqual(self.act("other", inspection_id, 7, "save_checklist", checklist=[True] * 3)[0], 403)
+
+    def test_inspector_reschedules_and_driver_is_coordinated_again(self):
+        inspection_id = self.create()
+        self.act("chief", inspection_id, 0, "assign", inspector_id=self.users["inspector"]["id"])
+        with self.assertRaises(ValueError):  # todavía no está agendada
+            self.act("inspector", inspection_id, 1, "reschedule", scheduled_date="2026-12-05",
+                     scheduled_time="09:00", scheduled_place="Sala 2")
+        self.act("inspector", inspection_id, 1, "complete_pre", checklist=[True] * 3,
+                 locomotion="auto_miem", departure_time="08:00", scheduled_date="2026-12-01",
+                 scheduled_time="10:00", scheduled_place="Sala 1")
+        self.act("coordinator", inspection_id, 2, "coordinate_driver", driver_name="Juan")
+        new = dict(scheduled_date="2026-12-05", scheduled_time="09:00", scheduled_place="Sala 1")
+        self.assertEqual(self.act("other", inspection_id, 3, "reschedule", **new)[0], 403)
+        with self.assertRaises(ValueError):
+            self.act("inspector", inspection_id, 3, "reschedule", scheduled_date="2026-12-01",
+                     scheduled_time="10:00", scheduled_place="Sala 1", departure_time="08:00")
+        self.assertEqual(self.act("inspector", inspection_id, 3, "reschedule", departure_time="07:30",
+                                  comment="Pidió otro día", **new)[0], 200)
+        mine = self.data("inspector")["inspections"][0]
+        self.assertEqual((mine["stage"], mine["scheduled_date"], mine["departure_time"], mine["driver_status"]),
+                         ("post_inspection", "2026-12-05", "07:30", "pending"))
+        last = mine["events"][-1]
+        self.assertEqual((last["action"], last["comment"]), ("reschedule", "Pidió otro día"))
+        self.assertIn("Fecha de inspección: 2026-12-01 → 2026-12-05", last["details_text"])
+        self.assertIn("Chofer coordinado → Pendiente de coordinar", last["details_text"])
+
+    def test_other_locomotion_clears_driver_task(self):
+        inspection_id = self.create()
+        self.act("chief", inspection_id, 0, "assign", inspector_id=self.users["inspector"]["id"])
+        self.act("inspector", inspection_id, 1, "save_checklist", checklist=[False] * 3, locomotion="auto_miem")
+        self.act("inspector", inspection_id, 2, "save_checklist", checklist=[False] * 3, locomotion="taxi")
+        self.assertEqual(self.data("inspector")["inspections"][0]["driver_status"], "")
+
     def test_invalid_inputs_stale_actions_and_permissions(self):
         inspection_id = self.create()
         for invalid in (None, True, "1", self.users["inactive"]["id"], self.users["lawyer"]["id"]):
@@ -133,9 +263,10 @@ class InspectionTests(unittest.TestCase):
         self.assertEqual(self.act("chief", inspection_id, 0, "assign", inspector_id=self.users["inspector"]["id"])[0], 200)
         self.assertEqual(self.act("chief", inspection_id, 0, "assign", inspector_id=self.users["other"]["id"])[0], 409)
         self.assertEqual(self.act("inspector", inspection_id, 1, "complete_post")[0], 409)
-        valid = dict(checklist=[False] * 6, scheduled_date="2026-11-24",
+        valid = dict(checklist=[True] * 3, locomotion="taxi", scheduled_date="2026-11-24",
                      scheduled_time="09:30", scheduled_place="Centro")
-        for field, value in (("checklist", [True] * 5), ("checklist", [1] * 6),
+        for field, value in (("checklist", [True] * 6), ("checklist", [1] * 3), ("locomotion", "avion"),
+                             ("checklist", [True, False, True]), ("locomotion", ""),
                              ("scheduled_date", "2026-02-30"), ("scheduled_time", "24:00"),
                              ("scheduled_place", " ")):
             invalid = {**valid, field: value}
@@ -189,8 +320,8 @@ class InspectionTests(unittest.TestCase):
     def run_full_flow(self):
         inspection_id = self.create()
         self.act("chief", inspection_id, 0, "assign", inspector_id=self.users["inspector"]["id"])
-        self.act("inspector", inspection_id, 1, "complete_pre", checklist=[True] * 3 + [False] * 3,
-                 scheduled_date="2026-12-01", scheduled_time="10:00", scheduled_place="Sala 1")
+        self.act("inspector", inspection_id, 1, "complete_pre", checklist=[True] * 3,
+                 locomotion="auto_miem", scheduled_date="2026-12-01", scheduled_time="10:00", scheduled_place="Sala 1")
         self.act("inspector", inspection_id, 2, "complete_post", checklist=[False] * 6)
         self.act("chief", inspection_id, 3, "return_post", comment="Revisar")
         self.act("inspector", inspection_id, 4, "complete_post", checklist=[True] * 6)
@@ -202,7 +333,7 @@ class InspectionTests(unittest.TestCase):
         self.assertIn("Número de trámite: 00012", events[0]["details_text"])
         self.assertEqual(events[1]["details_text"], "Inspector líder: (vacío) → inspector")
         self.assertIn("Fecha de inspección: (vacío) → 2026-12-01", events[2]["details_text"])
-        self.assertIn("Checklist previo: (vacío) → 3 de 6 casillas marcadas", events[2]["details_text"])
+        self.assertIn("Checklist previo: (vacío) → 3 de 3 casillas marcadas", events[2]["details_text"])
         self.assertIn("0 de 6 casillas marcadas → 6 de 6 casillas marcadas", events[5]["details_text"])
         connection = database.connect_db()
         try:
@@ -320,7 +451,7 @@ class InspectionTests(unittest.TestCase):
         self.assertIn("Segundo inspector: (vacío) → other", inspection["events"][1]["details_text"])
         # El líder continúa el flujo normal con la versión que recibió.
         self.assertEqual(self.act("inspector", inspection["id"], 1, "complete_pre",
-                                  checklist=[True] * 6, scheduled_date="2026-12-02",
+                                  checklist=[True] * 3, locomotion="propios", scheduled_date="2026-12-02",
                                   scheduled_time="11:00", scheduled_place="Hospital")[0], 200)
 
     def test_only_chief_assigns_when_creating(self):
@@ -335,8 +466,8 @@ class InspectionTests(unittest.TestCase):
         self.assertEqual(self.act("chief", inspection_id, 0, "assign",
                                   inspector_id=self.users["inspector"]["id"],
                                   second_inspector_id=self.users["other"]["id"])[0], 200)
-        self.act("inspector", inspection_id, 1, "complete_pre", checklist=[False] * 6,
-                 scheduled_date="2026-12-03", scheduled_time="08:00", scheduled_place="Clínica")
+        self.act("inspector", inspection_id, 1, "complete_pre", checklist=[True] * 3,
+                 locomotion="taxi", scheduled_date="2026-12-03", scheduled_time="08:00", scheduled_place="Clínica")
         seen = self.data("other")["inspections"]
         self.assertEqual([item["id"] for item in seen], [inspection_id])
         self.assertEqual(seen[0]["scheduled_date"], "2026-12-03")
@@ -371,3 +502,22 @@ class InspectionTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CoordinatorAccessTests(unittest.TestCase):
+    def test_coordinator_only_reaches_inspections(self):
+        import server
+
+        handler = server.RequestHandler.__new__(server.RequestHandler)
+        handler.current_user = {"role": "user", "workflow_role": "coordinacion"}
+        blocked = lambda path, method="GET": handler.coordinator_blocked(
+            path, server.COORDINATOR_GET_PATHS if method == "GET" else server.COORDINATOR_POST_PATHS)
+        self.assertFalse(blocked("/api/inspections"))
+        self.assertFalse(blocked("/api/inspections/action", "POST"))
+        self.assertFalse(blocked("/api/account/password", "POST"))
+        for path in ("/api/workflow", "/api/users", "/api/entities", "/api/records",
+                     "/api/inspections/export", "/api/inspections/planning"):
+            self.assertTrue(blocked(path), path)
+        self.assertTrue(blocked("/api/inspections", "POST"))
+        handler.current_user = {"role": "user", "workflow_role": "inspeccion"}
+        self.assertFalse(blocked("/api/workflow"))

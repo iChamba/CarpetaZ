@@ -28,6 +28,7 @@ const roleLabels = {
   administracion: "Secretaría",
   inspeccion: "Inspección",
   jefe_inspeccion: "Jefe de Inspección",
+  coordinacion: "Coordinación",
   jefe_licenciamiento: "Jefe de Licenciamiento",
   abogado: "Abogado",
   director: "Director",

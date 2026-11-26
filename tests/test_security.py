@@ -155,6 +155,24 @@ class AdminBootstrapTests(DatabaseTestCase):
         self.assertIsNone(auth.authenticate("admin-prueba", "contrasena-original-1"))
         self.assertIsNone(auth.get_session_user(token))
 
+    def test_user_changes_own_password_and_other_sessions_close(self):
+        self.bootstrap("contrasena-original-1")
+        user = auth.authenticate("admin-prueba", "contrasena-original-1")
+        current = auth.create_session(user["id"])
+        other = auth.create_session(user["id"])
+        self.assertFalse(auth.change_password(user["id"], "incorrecta", "nueva-clave-segura", "nueva-clave-segura", current))
+        with self.assertRaisesRegex(ValueError, "entre 12 y 256"):
+            auth.change_password(user["id"], "contrasena-original-1", "corta", "corta", current)
+        with self.assertRaisesRegex(ValueError, "no coinciden"):
+            auth.change_password(user["id"], "contrasena-original-1", "nueva-clave-segura", "otra-clave-segura", current)
+        with self.assertRaisesRegex(ValueError, "distinta"):
+            auth.change_password(user["id"], "contrasena-original-1", "contrasena-original-1", "contrasena-original-1", current)
+        self.assertTrue(auth.change_password(user["id"], "contrasena-original-1", "nueva-clave-segura", "nueva-clave-segura", current))
+        self.assertIsNotNone(auth.authenticate("admin-prueba", "nueva-clave-segura"))
+        self.assertIsNone(auth.authenticate("admin-prueba", "contrasena-original-1"))
+        self.assertIsNotNone(auth.get_session_user(current))
+        self.assertIsNone(auth.get_session_user(other))
+
     def test_unknown_user_still_checks_a_password_hash(self):
         with patch.object(auth, "verify_password", wraps=auth.verify_password) as verify:
             self.assertIsNone(auth.authenticate("no-existe", "cualquier-clave"))

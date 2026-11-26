@@ -1,4 +1,4 @@
-import { lastUpdateText, requestJson } from "./common.js";
+import { lastUpdateText, requestJson, setMessage } from "./common.js";
 import { initRecords, loadRecords, loadWorkflowRecords } from "./records.js";
 import { initUsers, invalidateLoadedUsers, loadUsers, openLinkedUser } from "./users.js";
 import { initEntities, loadEntities, openLinkedEntity } from "./entities.js";
@@ -41,6 +41,29 @@ function loadTabOnce(name, loader) {
 }
 
 tabs.forEach(tab => tab.addEventListener("click", () => activateTab(tab.dataset.tab)));
+document.getElementById("settings-open").addEventListener("click", () => activateTab("settings"));
+document.getElementById("password-form").addEventListener("submit", async event => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const values = Object.fromEntries(new FormData(form));
+  if (values.new_password !== values.confirm_password) {
+    setMessage("password-message", "La nueva contraseña y su confirmación no coinciden.", "error");
+    return;
+  }
+  const button = form.querySelector("button");
+  button.disabled = true;
+  try {
+    await requestJson("/api/account/password", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(values),
+    });
+    form.reset();
+    setMessage("password-message", "Contraseña actualizada. Las otras sesiones abiertas se cerraron.", "success");
+  } catch (error) {
+    setMessage("password-message", error.message, "error");
+  } finally {
+    button.disabled = false;
+  }
+});
 window.addEventListener("workflow-open-linked-profile", async event => {
   const { kind, name } = event.detail;
   const open = kind === "users" ? openLinkedUser : openLinkedEntity;
@@ -55,7 +78,17 @@ initEntities();
 initRecords();
 initWorkflows();
 initInspections();
-activateTab("workflows");
+// Coordinación solo trabaja en Mis Inspecciones (lista y calendario).
+requestJson("/api/session").then(({ user }) => {
+  if (user && user.role !== "admin" && user.workflow_role === "coordinacion") {
+    tabs.forEach(tab => tab.classList.toggle("hidden", tab.dataset.tab !== "inspections"));
+    document.getElementById("inspection-export").classList.add("hidden");
+    document.getElementById("workflow-current-user").textContent = `${user.display_name} (Coordinación)`;
+    activateTab("inspections");
+  } else {
+    activateTab("workflows");
+  }
+}).catch(() => activateTab("workflows"));
 async function refreshCatalogStatus() {
   const label = document.getElementById("catalog-status");
   try {

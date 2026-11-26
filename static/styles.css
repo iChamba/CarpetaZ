@@ -147,6 +147,8 @@ main { width: 100%; margin: 0; padding: 24px var(--layout-gutter) 48px; }
 .inspection-action-form, .inspection-checklist { margin-top: 12px; }
 .inspection-checklist { display: grid; gap: 5px; border: 1px solid #dce3ed; border-radius: 6px; }
 .inspection-checklist label { display: flex; align-items: center; gap: 4px; }
+.inspection-travel-times { display: inline-flex; flex-wrap: wrap; gap: 8px; margin-left: 22px; }
+.inspection-travel-times.hidden { display: none; }
 .workflow-form .hidden { display: none; }
 .workflow-application-fields { display: grid; grid-column: 1 / -1; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 10px; min-width: 0; padding: 12px; border: 1px solid #aebed0; border-radius: 6px; background: #f1f5f9; }
 .workflow-application-fields legend { color: #174b84; font-weight: 700; }
@@ -694,3 +696,7 @@ tr:last-child td { border-bottom: 0; }
   .authorization-card-heading { align-items: flex-start; flex-direction: column; }
   .authorization-section-heading { align-items: flex-start; flex-direction: column; }
 }
+
+.inspection-calendar-event.other-inspector { opacity: .75; border-left-style: dashed; }
+.settings-panel { max-width: 460px; }
+.settings-panel h3 { margin: 0 0 10px; }

@@ -26,7 +26,9 @@ const eventLabels = {
   complete_post: "Checklist posterior enviado al jefe",
   return_post: "Devuelto para corrección", approve: "Revisión aprobada",
   send: "Envío registrado", set_second: "Segundo inspector actualizado",
-  set_entity: "Entidad actualizada",
+  set_entity: "Entidad actualizada", save_checklist: "Checklist guardado",
+  coordinate_driver: "Chofer coordinado",
+  reschedule: "Inspección re-coordinada",
 };
 const requestTypes = { inicial: "Autorización inicial", renovacion: "Renovación" };
 let month = new Date();
@@ -64,6 +66,36 @@ function stageBadge(stage) {
   return badge;
 }
 
+// Inspección de otro inspector: solo se muestran los datos de agenda.
+function showCalendarOnly(inspection) {
+  selectedId = null;
+  renderCalendar();
+  for (const row of byId("inspection-rows").querySelectorAll("[data-inspection-id]")) {
+    row.classList.remove("selected");
+    row.querySelector("button")?.setAttribute("aria-pressed", "false");
+  }
+  const detail = byId("inspection-detail");
+  detail.classList.remove("empty-state");
+  const summary = element("div", undefined, "workflow-case-summary");
+  const subtitle = element("p", `Inspección #${inspection.id}`, "workflow-summary-subtitle");
+  subtitle.append(stageBadge(inspection.stage));
+  summary.append(element("h3", inspection.company_name || inspection.case_number || `Inspección #${inspection.id}`), subtitle);
+  const fields = element("section", undefined, "workflow-application-data");
+  fields.append(element("h4", "Agenda (inspección de otro inspector)"));
+  const list = document.createElement("dl");
+  for (const [field, label] of [
+    ["scheduled_date", "Fecha de inspección"], ["scheduled_time", "Hora de inspección"],
+    ["scheduled_place", "Lugar de inspección"], ["inspector_name", "Inspector líder"],
+    ["second_inspector_name", "Segundo inspector"],
+  ]) {
+    const item = document.createElement("div");
+    item.append(element("dt", label), element("dd", inspection[field] || "—"));
+    list.append(item);
+  }
+  fields.append(list);
+  detail.replaceChildren(summary, fields);
+}
+
 function renderCalendar() {
   byId("inspection-month").textContent = new Intl.DateTimeFormat("es-UY", {
     month: "long", year: "numeric",
@@ -83,7 +115,7 @@ function renderCalendar() {
         const key = `${month.getFullYear()}-${String(month.getMonth() + 1).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
         cell.append(element("span", String(day), "inspection-calendar-day"));
         if (key === today) cell.classList.add("today");
-        const events = (data?.inspections || [])
+        const events = (data?.calendar || data?.inspections || [])
           .filter(inspection => inspection.scheduled_date === key)
           .sort((a, b) => (a.scheduled_time || "").localeCompare(b.scheduled_time || ""));
         for (const inspection of events) {
@@ -95,7 +127,9 @@ function renderCalendar() {
           button.type = "button";
           const people = [inspection.inspector_name, inspection.second_inspector_name].filter(Boolean).join(" y ");
           button.title = `${inspection.scheduled_place} · ${people}`;
-          button.addEventListener("click", () => selectInspection(inspection.id));
+          const own = data.inspections.some(item => item.id === inspection.id);
+          if (!own) button.classList.add("other-inspector");
+          button.addEventListener("click", () => own ? selectInspection(inspection.id) : showCalendarOnly(inspection));
           cell.append(button);
         }
       } else {
@@ -113,20 +147,171 @@ function inputLabel(text, input) {
   return label;
 }
 
-function checklist(name, values, editable) {
+// Guarda las casillas en el servidor al marcarlas, en orden, para que no se pierdan al recargar.
+const preChecklistItems = [
+  "Coordinar inspección con el usuario",
+  "Locomoción",
+  "Preparar documentación",
+];
+const locomotionOptions = { auto_miem: "Auto MIEM", taxi: "Taxi", propios: "Medios propios" };
+const driverStatus = { pending: "Pendiente de coordinar", coordinated: "Chofer coordinado" };
+
+function isCoordinator(user) {
+  return user.role !== "admin" && user.workflow_role === "coordinacion";
+}
+
+function driverText(inspection) {
+  if (inspection.driver_status === "coordinated") {
+    return `Chofer coordinado${inspection.driver_name ? `: ${inspection.driver_name}` : ""}`;
+  }
+  return driverStatus[inspection.driver_status] || "";
+}
+
+function travelText(inspection) {
+  const parts = [];
+  if (inspection.departure_time) parts.push(`salida ${inspection.departure_time}`);
+  if (inspection.arrival_time) parts.push(`llegada aprox. ${inspection.arrival_time}`);
+  return parts.length ? `Auto MIEM: ${parts.join(", ")}` : "Auto MIEM: horarios sin completar";
+}
+
+function inspectionWhen(inspection) {
+  const when = [inspection.scheduled_date, inspection.scheduled_time].filter(Boolean).join(" ");
+  return [when, inspection.scheduled_place].filter(Boolean).join(" · ") || "sin fecha agendada";
+}
+
+// Tareas de Coordinación (chofer por coordinar) y confirmaciones que recibe el inspector.
+function renderDriverTasks() {
+  const panel = byId("inspection-driver-tasks");
+  const user = data.current_user;
+  let title = "";
+  let items = [];
+  if (isCoordinator(user)) {
+    title = "Tareas: coordinar con chofer";
+    items = data.inspections.filter(item => item.driver_status === "pending" && item.stage !== "completed");
+  } else {
+    title = "Choferes coordinados para tus inspecciones";
+    items = data.inspections.filter(item => item.driver_status === "coordinated" &&
+      item.stage !== "completed" && item.inspector_id === user.id);
+  }
+  panel.replaceChildren();
+  panel.classList.toggle("hidden", !items.length);
+  if (!items.length) return;
+  panel.append(element("h3", title));
+  const list = element("ul");
+  for (const item of items) {
+    const entry = element("li");
+    const open = element("button", item.company_name || `Inspección #${item.id}`, "button secondary small");
+    open.type = "button";
+    open.addEventListener("click", () => selectInspection(item.id));
+    const extra = isCoordinator(user)
+      ? ` ${inspectionWhen(item)} · ${travelText(item)} · Inspector: ${item.inspector_name || "—"}` +
+        (item.driver_name ? ` · Re-coordinada (chofer anterior: ${item.driver_name})` : "")
+      : ` ${inspectionWhen(item)} · ${driverText(item)}`;
+    entry.append(open, document.createTextNode(extra));
+    list.append(entry);
+  }
+  panel.append(list);
+}
+let checklistSaves = Promise.resolve();
+
+function autosaveChecklist(fieldset, inspection, key) {
+  fieldset.addEventListener("change", () => {
+    const values = [...fieldset.querySelectorAll('input[type="checkbox"]')].map(input => input.checked);
+    const locomotion = fieldset.querySelector('select[name="locomotion"]');
+    const travel = locomotion && locomotion.value === "auto_miem"
+      ? {
+        departure_time: fieldset.querySelector('input[name="departure_time"]').value,
+        arrival_time: fieldset.querySelector('input[name="arrival_time"]').value,
+      }
+      : { departure_time: "", arrival_time: "" };
+    checklistSaves = checklistSaves.then(async () => {
+      try {
+        const payload = {
+          inspection_id: inspection.id, version: inspection.version,
+          action: "save_checklist", checklist: values,
+        };
+        if (locomotion) Object.assign(payload, { locomotion: locomotion.value }, travel);
+        const result = await requestJson("/api/inspections/action", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        inspection.version = result.version;
+        inspection[key] = values;
+        if (locomotion) {
+          inspection.locomotion = locomotion.value;
+          Object.assign(inspection, travel);
+          if (locomotion.value !== "auto_miem") {
+            inspection.driver_status = "";
+            inspection.driver_name = "";
+          } else if (!inspection.driver_status) {
+            inspection.driver_status = "pending";
+          }
+        }
+        setMessage("inspection-message", "Checklist guardado.", "success");
+      } catch (error) {
+        setMessage("inspection-message", error.message, "error");
+      }
+    });
+  });
+}
+
+function locomotionSelect(value, editable) {
+  const select = document.createElement("select");
+  select.name = "locomotion";
+  select.disabled = !editable;
+  select.setAttribute("aria-label", "Medio de locomoción");
+  select.append(Object.assign(element("option", "Selecciona el medio"), { value: "" }));
+  for (const [key, text] of Object.entries(locomotionOptions)) {
+    select.append(Object.assign(element("option", text), { value: key, selected: key === value }));
+  }
+  return select;
+}
+
+function travelTimes(inspection, editable, select) {
+  const wrapper = element("span", undefined, "inspection-travel-times");
+  for (const [name, text] of [["departure_time", "Hora de salida"], ["arrival_time", "Hora aprox. de llegada"]]) {
+    const input = document.createElement("input");
+    input.type = "time";
+    input.name = name;
+    input.value = inspection[name] || "";
+    input.disabled = !editable;
+    const label = element("label", `${text} `);
+    label.append(input);
+    wrapper.append(label);
+  }
+  const toggle = () => wrapper.classList.toggle("hidden", select.value !== "auto_miem");
+  select.addEventListener("change", toggle);
+  toggle();
+  return wrapper;
+}
+
+function checklist(name, values, editable, items = null, locomotion = "", inspection = null) {
   const fieldset = element("fieldset", undefined, "inspection-checklist");
   fieldset.append(element("legend", name));
-  for (let i = 0; i < 6; i++) {
+  const labels = items || Array.from({ length: 6 }, (_, i) => `Ítem ${i + 1}`);
+  labels.forEach((text, i) => {
     const input = document.createElement("input");
     input.type = "checkbox";
     input.name = `check-${i}`;
     input.checked = values[i] === true;
     input.disabled = !editable;
     const label = element("label");
-    label.append(input, document.createTextNode(` Ítem ${i + 1}`));
+    label.append(input, document.createTextNode(` ${text}`));
+    if (items === preChecklistItems && text === "Locomoción") {
+      const select = locomotionSelect(locomotion, editable);
+      label.append(document.createTextNode(" "), select);
+      fieldset.append(label);
+      if (inspection) fieldset.append(travelTimes(inspection, editable, select));
+      return;
+    }
     fieldset.append(label);
-  }
+  });
   return fieldset;
+}
+
+function preChecklist(inspection, editable) {
+  return checklist("Checklist previo", inspection.pre_checklist, editable, preChecklistItems,
+    inspection.locomotion || "", inspection);
 }
 
 function isChief(user) {
@@ -239,7 +424,22 @@ function actionButton(label, action, className = "button workflow-approve") {
   return button;
 }
 
+function missingPreChecklist(form) {
+  const missing = [...form.querySelectorAll('input[type="checkbox"]')]
+    .map((input, i) => input.checked ? null : `marcar «${preChecklistItems[i]}»`).filter(Boolean);
+  if (!form.elements.locomotion.value) missing.push("elegir el medio de locomoción");
+  return missing;
+}
+
 async function submitAction(form, inspection, action) {
+  await checklistSaves;
+  if (action === "complete_pre") {
+    const missing = missingPreChecklist(form);
+    if (missing.length) {
+      setMessage("inspection-message", `Para agendar falta: ${missing.join("; ")}.`, "error");
+      return;
+    }
+  }
   const payload = { inspection_id: inspection.id, version: inspection.version, action };
   if (action === "assign") payload.inspector_id = Number(form.elements.inspector_id.value);
   if (action === "assign" || action === "set_second") {
@@ -249,12 +449,28 @@ async function submitAction(form, inspection, action) {
     payload.checklist = [...form.querySelectorAll('input[type="checkbox"]')].map(input => input.checked);
   }
   if (action === "complete_pre") {
+    payload.locomotion = form.elements.locomotion.value;
+    const auto = payload.locomotion === "auto_miem";
+    payload.departure_time = auto ? form.elements.departure_time.value : "";
+    payload.arrival_time = auto ? form.elements.arrival_time.value : "";
+  }
+  if (action === "complete_pre") {
     payload.scheduled_date = form.elements.scheduled_date.value;
     payload.scheduled_time = form.elements.scheduled_time.value;
     payload.scheduled_place = form.elements.scheduled_place.value;
   }
   if (action === "approve" || action === "return_post") payload.comment = form.elements.comment.value;
   if (action === "set_entity") payload.entity_name = form.elements.entity_name.value;
+  if (action === "coordinate_driver") payload.driver_name = form.elements.driver_name.value;
+  if (action === "reschedule") {
+    for (const name of ["scheduled_date", "scheduled_time", "scheduled_place", "comment"]) {
+      payload[name] = form.elements[name].value;
+    }
+    if (form.elements.departure_time) {
+      payload.departure_time = form.elements.departure_time.value;
+      payload.arrival_time = form.elements.arrival_time.value;
+    }
+  }
   const buttons = [...form.querySelectorAll("button")];
   buttons.forEach(button => { button.disabled = true; });
   try {
@@ -267,6 +483,45 @@ async function submitAction(form, inspection, action) {
   } finally {
     buttons.forEach(button => { button.disabled = false; });
   }
+}
+
+function rescheduleForm(inspection) {
+  const panel = element("details", undefined, "workflow-create-panel");
+  panel.append(element("summary", "Re-coordinar inspección"));
+  const form = element("form", undefined, "workflow-form inspection-action-form");
+  const fields = [
+    ["scheduled_date", "Nueva fecha", "date", inspection.scheduled_date, true],
+    ["scheduled_time", "Nueva hora", "time", inspection.scheduled_time, true],
+    ["scheduled_place", "Lugar", "text", inspection.scheduled_place, true],
+  ];
+  if (inspection.locomotion === "auto_miem") {
+    fields.push(["departure_time", "Hora de salida (Auto MIEM)", "time", inspection.departure_time, false],
+      ["arrival_time", "Hora aprox. de llegada", "time", inspection.arrival_time, false]);
+  }
+  for (const [name, label, type, value, required] of fields) {
+    const input = document.createElement("input");
+    input.name = name;
+    input.type = type;
+    input.required = required;
+    input.value = value || "";
+    if (name === "scheduled_place") input.maxLength = 255;
+    form.append(inputLabel(label, input));
+  }
+  const reason = document.createElement("textarea");
+  reason.name = "comment";
+  reason.maxLength = 1000;
+  reason.rows = 2;
+  form.append(inputLabel("Motivo (opcional)", reason));
+  if (inspection.locomotion === "auto_miem") {
+    form.append(element("p", "Coordinación recibirá de nuevo la tarea de coordinar el chofer.", "form-help"));
+  }
+  form.append(actionButton("Guardar nueva coordinación", "reschedule"));
+  form.addEventListener("submit", event => {
+    event.preventDefault();
+    submitAction(form, inspection, event.submitter.dataset.action);
+  });
+  panel.append(form);
+  return panel;
 }
 
 function renderActions(detail, inspection) {
@@ -315,6 +570,28 @@ function renderActions(detail, inspection) {
     });
     detail.append(secondForm);
   }
+  if (isCoordinator(user) || (user.role === "admin" && inspection.driver_status)) {
+    if (["pending", "coordinated"].includes(inspection.driver_status)) {
+      const driverForm = element("form", undefined, "workflow-form inspection-action-form");
+      const input = document.createElement("input");
+      input.name = "driver_name";
+      input.maxLength = 120;
+      input.required = true;
+      input.value = inspection.driver_name || "";
+      input.placeholder = "Nombre del chofer";
+      driverForm.append(inputLabel("Chofer que viene", input),
+        actionButton(inspection.driver_status === "coordinated" ? "Cambiar chofer" : "Confirmar chofer", "coordinate_driver"));
+      driverForm.addEventListener("submit", event => {
+        event.preventDefault();
+        submitAction(driverForm, inspection, event.submitter.dataset.action);
+      });
+      detail.append(driverForm);
+    }
+    if (isCoordinator(user)) return;
+  }
+  if (inspector && ["post_inspection", "chief_review", "send"].includes(inspection.stage)) {
+    detail.append(rescheduleForm(inspection));
+  }
   const form = element("form", undefined, "workflow-form inspection-action-form");
   if (inspection.stage === "assignment" && chief) {
     form.append(
@@ -323,7 +600,9 @@ function renderActions(detail, inspection) {
       actionButton("Asignar y enviar al inspector", "assign"),
     );
   } else if (inspection.stage === "pre_inspection" && inspector) {
-    form.append(checklist("Checklist previo", inspection.pre_checklist, true));
+    const pre = preChecklist(inspection, true);
+    autosaveChecklist(pre, inspection, "pre_checklist");
+    form.append(pre);
     for (const [name, label, type, value] of [
       ["scheduled_date", "Fecha de inspección", "date", inspection.scheduled_date],
       ["scheduled_time", "Hora de inspección", "time", inspection.scheduled_time],
@@ -339,8 +618,9 @@ function renderActions(detail, inspection) {
     }
     form.append(actionButton("Completar checklist y agendar", "complete_pre"));
   } else if (inspection.stage === "post_inspection" && inspector) {
-    form.append(checklist("Checklist posterior", inspection.post_checklist, true),
-      actionButton("Enviar checklist al jefe", "complete_post"));
+    const post = checklist("Checklist posterior", inspection.post_checklist, true);
+    autosaveChecklist(post, inspection, "post_checklist");
+    form.append(post, actionButton("Enviar checklist al jefe", "complete_post"));
   } else if (inspection.stage === "chief_review" && chief) {
     const comment = document.createElement("textarea");
     comment.name = "comment";
@@ -386,9 +666,19 @@ function selectInspection(id) {
     item.append(element("dt", label), element("dd", value || "—"));
     list.append(item);
   }
+  if (inspection.driver_status) {
+    const item = document.createElement("div");
+    item.append(element("dt", "Chofer (Auto MIEM)"), element("dd", driverText(inspection)));
+    list.append(item);
+    for (const [field, label] of [["departure_time", "Hora de salida"], ["arrival_time", "Hora aprox. de llegada"]]) {
+      const time = document.createElement("div");
+      time.append(element("dt", label), element("dd", inspection[field] || "—"));
+      list.append(time);
+    }
+  }
   fields.append(list);
   detail.replaceChildren(summary, fields);
-  if (inspection.pre_checklist.length) detail.append(checklist("Checklist previo", inspection.pre_checklist, false));
+  if (inspection.pre_checklist.length) detail.append(preChecklist(inspection, false));
   if (inspection.post_checklist.length && inspection.stage !== "post_inspection") {
     detail.append(checklist("Checklist posterior", inspection.post_checklist, false));
   }
@@ -406,6 +696,16 @@ function selectInspection(id) {
     history.append(entries);
     detail.append(history);
   }
+}
+
+let listFilter = "active";
+
+function renderInspectionList() {
+  for (const button of byId("inspection-list-filter").querySelectorAll("[data-inspection-filter]")) {
+    button.setAttribute("aria-pressed", String(button.dataset.inspectionFilter === listFilter));
+  }
+  renderInspections(data.inspections.filter(item =>
+    (item.stage === "completed") === (listFilter === "completed")));
 }
 
 function renderInspections(inspections) {
@@ -775,7 +1075,8 @@ export async function loadInspections() {
     const chiefView = isChief(data.current_user);
     byId("inspection-subtabs").classList.toggle("hidden", !chiefView);
     if (!chiefView) showInspectionView("list");
-    renderInspections(data.inspections);
+    renderInspectionList();
+    renderDriverTasks();
     renderCalendar();
     if (data.inspections.some(item => item.id === selectedId)) {
       selectInspection(selectedId);
@@ -795,6 +1096,12 @@ export async function loadInspections() {
 
 export function initInspections() {
   renderCalendar();
+  for (const button of byId("inspection-list-filter").querySelectorAll("[data-inspection-filter]")) {
+    button.addEventListener("click", () => {
+      listFilter = button.dataset.inspectionFilter;
+      if (data) renderInspectionList();
+    });
+  }
   for (const button of byId("inspection-subtabs").querySelectorAll("[data-inspection-view]")) {
     button.addEventListener("click", () => showInspectionView(button.dataset.inspectionView));
   }

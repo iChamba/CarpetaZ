@@ -19,7 +19,7 @@ STAGE_ROLES = {
     "abogado": "abogado",
     "director": "director",
 }
-WORKFLOW_ROLES = set(STAGE_ROLES.values()) | {"jefe_inspeccion"}
+WORKFLOW_ROLES = set(STAGE_ROLES.values()) | {"jefe_inspeccion", "coordinacion"}
 DELIVERY_METHODS = {"presencial": "Presencial", "apia": "APIA", "mail": "Mail"}
 APPLICATION_FIELDS = {
     "application_date": ("La fecha de solicitud", 10),

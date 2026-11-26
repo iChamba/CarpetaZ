@@ -9,6 +9,7 @@ from urllib.parse import parse_qs, urlparse
 from auth import (
     LOGIN_THROTTLE,
     authenticate,
+    change_password,
     create_session,
     get_session_user,
     revoke_session,
@@ -45,6 +46,9 @@ from settings import (
     SESSION_COOKIE_SECURE,
 )
 
+
+COORDINATOR_GET_PATHS = {"/api/status", "/api/session", "/api/inspections"}
+COORDINATOR_POST_PATHS = {"/api/inspections/action", "/api/account/password"}
 
 class BaseRequestHandler(BaseHTTPRequestHandler):
     server_version = "DocumentosLocales/1.0"
@@ -116,6 +120,27 @@ class BaseRequestHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def change_own_password(self) -> None:
+        data = self.read_json()
+        user = self.current_user
+        address = self.client_address[0]
+        if LOGIN_THROTTLE.retry_after(user["username"], address):
+            return self.send_error_json(
+                "Demasiados intentos fallidos. Espera 15 minutos e inténtalo de nuevo.", 429
+            )
+        cookie = SimpleCookie()
+        cookie.load(self.headers.get("Cookie", ""))
+        morsel = cookie.get("session")
+        changed = change_password(
+            user["id"], data.get("current_password"), data.get("new_password"),
+            data.get("confirm_password"), morsel.value if morsel else "",
+        )
+        if not changed:
+            LOGIN_THROTTLE.record_failure(user["username"], address)
+            return self.send_error_json("La contraseña actual no es correcta.", 400)
+        LOGIN_THROTTLE.record_success(user["username"], address)
+        self.send_json({"changed": True})
+
     def logout(self) -> None:
         cookie = SimpleCookie()
         cookie.load(self.headers.get("Cookie", ""))
@@ -160,6 +185,14 @@ class BaseRequestHandler(BaseHTTPRequestHandler):
             raise ValueError("El cuerpo debe ser un objeto JSON.")
         return value
 
+    def coordinator_blocked(self, path: str, allowed: set) -> bool:
+        """El rol Coordinación solo usa Mis Inspecciones (lista y calendario)."""
+        user = self.current_user or {}
+        return (
+            user.get("role") != "admin" and user.get("workflow_role") == "coordinacion"
+            and path.startswith("/api/") and path not in allowed
+        )
+
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
         params = parse_qs(parsed.query)
@@ -176,6 +209,8 @@ class BaseRequestHandler(BaseHTTPRequestHandler):
                 return self.reject_authentication()
             if parsed.path == "/":
                 return self.serve_static("index.html", "text/html; charset=utf-8")
+            if self.coordinator_blocked(parsed.path, COORDINATOR_GET_PATHS):
+                return self.send_error_json("Tu rol solo puede usar Mis Inspecciones.", 403)
             static_assets = {
                 "/styles.css": ("styles.css", "text/css; charset=utf-8"),
                 "/theme/tokens.css": ("theme/tokens.css", "text/css; charset=utf-8"),
@@ -252,6 +287,10 @@ class BaseRequestHandler(BaseHTTPRequestHandler):
                 return self.reject_authentication()
             if parsed.path == "/api/logout":
                 return self.logout()
+            if parsed.path == "/api/account/password":
+                return self.change_own_password()
+            if self.coordinator_blocked(parsed.path, COORDINATOR_POST_PATHS):
+                return self.send_error_json("Tu rol solo puede usar Mis Inspecciones.", 403)
             if parsed.path == "/api/catalog/refresh":
                 if not start_catalog():
                     return self.send_error_json("Ya hay una actualización de catálogo en curso.", 409)

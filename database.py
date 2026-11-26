@@ -158,6 +158,27 @@ def _initialize_planning(connection: sqlite3.Connection, inspection_columns) -> 
         connection.execute(
             "ALTER TABLE inspections ADD COLUMN entity_name TEXT NOT NULL DEFAULT ''"
         )
+    if "locomotion" not in inspection_columns:
+        # Medio de locomoción elegido en el checklist previo.
+        connection.execute(
+            "ALTER TABLE inspections ADD COLUMN locomotion TEXT NOT NULL DEFAULT ''"
+        )
+    if "driver_status" not in inspection_columns:
+        # Coordinación del chofer cuando se viaja en Auto MIEM: '', 'pending' o 'coordinated'.
+        connection.execute(
+            "ALTER TABLE inspections ADD COLUMN driver_status TEXT NOT NULL DEFAULT ''"
+        )
+        connection.execute(
+            "ALTER TABLE inspections ADD COLUMN driver_name TEXT NOT NULL DEFAULT ''"
+        )
+    if "departure_time" not in inspection_columns:
+        # Horarios del viaje en Auto MIEM, para coordinar el chofer.
+        connection.execute(
+            "ALTER TABLE inspections ADD COLUMN departure_time TEXT NOT NULL DEFAULT ''"
+        )
+        connection.execute(
+            "ALTER TABLE inspections ADD COLUMN arrival_time TEXT NOT NULL DEFAULT ''"
+        )
     # Ficha de cada entidad usuaria: datos que se van juntando (manual o desde inspecciones).
     connection.execute(
         "CREATE TABLE IF NOT EXISTS entity_profiles ("

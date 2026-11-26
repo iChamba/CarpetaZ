@@ -215,6 +215,41 @@ def get_session_user(token: str) -> dict | None:
     return dict(row) if row else None
 
 
+def change_password(user_id: int, current: object, new: object, confirm: object,
+                    keep_token: str) -> bool:
+    """Cambia la contraseña propia. Devuelve False si la actual no coincide.
+
+    Cierra las demás sesiones del usuario y conserva la que hizo el cambio.
+    """
+    if not isinstance(current, str) or len(current) > MAX_PASSWORD_LENGTH:
+        return False
+    password = validate_new_password(new)
+    if confirm != password:
+        raise ValueError("La nueva contraseña y su confirmación no coinciden.")
+    connection = connect_db()
+    try:
+        row = connection.execute(
+            "SELECT password_hash FROM workflow_users WHERE id = ? AND active = 1", (user_id,)
+        ).fetchone()
+        if not row or not verify_password(current, row["password_hash"]):
+            return False
+        if verify_password(password, row["password_hash"]):
+            raise ValueError("La nueva contraseña debe ser distinta de la actual.")
+        keep_hash = hashlib.sha256(keep_token.encode("ascii", errors="ignore")).hexdigest()
+        connection.execute(
+            "UPDATE workflow_users SET password_hash = ? WHERE id = ?",
+            (hash_password(password), user_id),
+        )
+        connection.execute(
+            "DELETE FROM workflow_sessions WHERE user_id = ? AND token_hash != ?",
+            (user_id, keep_hash),
+        )
+        connection.commit()
+        return True
+    finally:
+        connection.close()
+
+
 def revoke_session(token: str) -> None:
     token_hash = hashlib.sha256(token.encode("ascii", errors="ignore")).hexdigest()
     connection = connect_db()
