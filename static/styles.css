@@ -700,3 +700,13 @@ tr:last-child td { border-bottom: 0; }
 .inspection-calendar-event.other-inspector { opacity: .75; border-left-style: dashed; }
 .settings-panel { max-width: 460px; }
 .settings-panel h3 { margin: 0 0 10px; }
+.inspection-checklist-na { margin-left: 22px; color: var(--color-text-muted); font-size: .9rem; }
+.inspection-requirement { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 6px 0; border-bottom: 1px solid #eef2f7; }
+.inspection-requirement span { flex: 1 1 220px; }
+.inspection-calendar-event[data-stage="requirement"] { --stage-bg: #fef3c7; --stage-fg: #92400e; }
+.inspection-calendar-event[data-stage="requirement-resolved"] { --stage-bg: #dcfce7; --stage-fg: #166534; }
+.inspection-calendar-event[data-stage="requirement-resolved"] span, .inspection-requirement.resolved span { text-decoration: line-through; }
+.inspection-next-date { margin-top: 6px; font-weight: 600; }
+.inspection-requirement-link { flex: 1 1 220px; padding: 0; border: 0; background: none; color: #174b84; font: inherit; text-align: left; text-decoration: underline; cursor: pointer; }
+.inspection-requirement.resolved .inspection-requirement-link { text-decoration: line-through; }
+.inspection-search { width: 100%; margin: 4px 0 6px; }

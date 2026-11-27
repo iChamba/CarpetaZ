@@ -304,6 +304,8 @@ class BaseRequestHandler(BaseHTTPRequestHandler):
                 return self.create_inspection(data)
             if parsed.path == "/api/inspections/action":
                 return self.act_on_inspection(data)
+            if parsed.path == "/api/inspections/requirement":
+                return self.act_on_requirement(data)
             if parsed.path == "/api/entity/record":
                 return self.update_entity_record(data)
             if parsed.path == "/api/entity/equipment":

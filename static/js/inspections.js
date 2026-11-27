@@ -29,6 +29,11 @@ const eventLabels = {
   set_entity: "Entidad actualizada", save_checklist: "Checklist guardado",
   coordinate_driver: "Chofer coordinado",
   reschedule: "Inspección re-coordinada",
+  add_requirement: "Requerimiento agregado",
+  remove_requirement: "Requerimiento eliminado",
+  resolve_requirement: "Requerimiento resuelto",
+  reopen_requirement: "Requerimiento reabierto",
+  extend_requirement: "Plazo de requerimiento extendido",
 };
 const requestTypes = { inicial: "Autorización inicial", renovacion: "Renovación" };
 let month = new Date();
@@ -96,7 +101,199 @@ function showCalendarOnly(inspection) {
   detail.replaceChildren(summary, fields);
 }
 
+let calendarMode = "inspections";
+
+function formatDay(iso) {
+  const [year, monthNumber, day] = (iso || "").split("-");
+  return year ? `${day}/${monthNumber}/${year}` : "—";
+}
+
+async function requirementAction(inspection, payload) {
+  await checklistSaves;
+  try {
+    await requestJson("/api/inspections/action", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ inspection_id: inspection.id, version: inspection.version, ...payload }),
+    });
+    if (await loadInspections()) {
+      setMessage("inspection-message", payload.action === "add_requirement"
+        ? "Requerimiento agregado." : "Requerimiento eliminado.", "success");
+    }
+  } catch (error) {
+    setMessage("inspection-message", error.message, "error");
+  }
+}
+
+// Requerimientos de la inspección: lista y, si se puede editar, alta de a uno con texto y plazo.
+function requirementsSection(inspection, editable) {
+  const section = element("fieldset", undefined, "inspection-checklist inspection-requirements");
+  section.append(element("legend", "Requerimientos"));
+  const items = inspection.requirements || [];
+  if (!items.length) section.append(element("p", "Sin requerimientos.", "form-help"));
+  for (const item of items) {
+    const row = element("div", undefined, "inspection-requirement");
+    const open = element("button", item.text, "inspection-requirement-link");
+    open.type = "button";
+    open.title = "Ver en el calendario de requerimientos";
+    open.addEventListener("click", () => openRequirementInCalendar(item));
+    row.append(open,
+      element("strong", item.resolved_at ? "Resuelto" : `Plazo: ${formatDay(item.due_date)}`));
+    if (item.resolved_at) row.classList.add("resolved");
+    if (editable) {
+      const remove = element("button", "Quitar", "button secondary small");
+      remove.type = "button";
+      remove.addEventListener("click", () => requirementAction(inspection,
+        { action: "remove_requirement", requirement_id: item.id }));
+      row.append(remove);
+    }
+    section.append(row);
+  }
+  if (editable) {
+    const text = document.createElement("textarea");
+    text.rows = 2;
+    text.maxLength = 1000;
+    text.placeholder = "Descripción del requerimiento";
+    const due = document.createElement("input");
+    due.type = "date";
+    const add = element("button", "Agregar requerimiento", "button secondary");
+    add.type = "button";
+    add.addEventListener("click", () => {
+      if (!text.value.trim() || !due.value) {
+        setMessage("inspection-message", "Escribe el requerimiento y elige su plazo.", "error");
+        return;
+      }
+      requirementAction(inspection, { action: "add_requirement", requirement_text: text.value, due_date: due.value });
+    });
+    // Están dentro del formulario del checklist: Enter agrega el requerimiento en vez de enviarlo.
+    due.addEventListener("keydown", event => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        add.click();
+      }
+    });
+    section.append(inputLabel("Nuevo requerimiento", text), inputLabel("Plazo", due), add);
+  }
+  return section;
+}
+
+async function requirementUpdate(requirement, payload, message) {
+  try {
+    await requestJson("/api/inspections/requirement", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ requirement_id: requirement.id, ...payload }),
+    });
+    if (await loadInspections()) {
+      const updated = data.requirements.find(item => item.id === requirement.id);
+      if (updated) showRequirement(updated);
+      setMessage("inspection-message", message, "success");
+    }
+  } catch (error) {
+    setMessage("inspection-message", error.message, "error");
+  }
+}
+
+// Detalle de un requerimiento abierto desde el calendario, con resolver y extender plazo.
+let selectedRequirementId = null;
+
+// Lleva el calendario al mes del plazo, lo muestra en modo requerimientos y abre la ficha.
+function openRequirementInCalendar(requirement) {
+  const [year, monthNumber] = requirement.due_date.split("-").map(Number);
+  month = new Date(year, monthNumber - 1, 1);
+  calendarMode = "requirements";
+  const current = data.requirements.find(item => item.id === requirement.id) || requirement;
+  showRequirement(current);
+  const target = byId("inspection-calendar-days")
+    .querySelector(`[data-requirement-id="${requirement.id}"]`);
+  (target || byId("inspection-calendar-title")).scrollIntoView({ behavior: "smooth", block: "center" });
+  target?.focus({ preventScroll: true });
+}
+
+function showRequirement(requirement) {
+  selectedId = null;
+  selectedRequirementId = requirement.id;
+  renderCalendar();
+  const detail = byId("inspection-detail");
+  detail.classList.remove("empty-state");
+  const summary = element("div", undefined, "workflow-case-summary");
+  summary.append(element("h3", "Requerimiento"),
+    element("p", requirement.resolved_at ? "Resuelto" : `Plazo: ${formatDay(requirement.due_date)}`,
+      "workflow-summary-subtitle"));
+  const fields = element("section", undefined, "workflow-application-data");
+  const list = document.createElement("dl");
+  for (const [label, value] of [
+    ["Requerimiento", requirement.text],
+    ["Plazo", formatDay(requirement.due_date)],
+    ["Inspección", requirement.company_name || requirement.case_number || `#${requirement.inspection_id}`],
+    ["Inspector líder", requirement.inspector_name],
+    ["Ingresado por", requirement.created_by_name],
+    ["Estado", requirement.resolved_at ? "Resuelto" : "Pendiente"],
+  ]) {
+    const item = document.createElement("div");
+    item.append(element("dt", label), element("dd", value || "—"));
+    list.append(item);
+  }
+  fields.append(list);
+  detail.replaceChildren(summary, fields);
+  const actions = element("div", undefined, "workflow-form inspection-action-form");
+  if (requirement.resolved_at) {
+    const reopen = element("button", "Reabrir requerimiento", "button secondary");
+    reopen.type = "button";
+    reopen.addEventListener("click", () => requirementUpdate(requirement, { action: "reopen" }, "Requerimiento reabierto."));
+    actions.append(reopen);
+  } else {
+    const resolve = element("button", "Resolver requerimiento", "button workflow-approve");
+    resolve.type = "button";
+    resolve.addEventListener("click", () => requirementUpdate(requirement, { action: "resolve" }, "Requerimiento resuelto."));
+    const due = document.createElement("input");
+    due.type = "date";
+    due.value = requirement.due_date;
+    due.min = requirement.due_date;
+    const extend = element("button", "Extender plazo", "button secondary");
+    extend.type = "button";
+    extend.addEventListener("click", () => {
+      if (!due.value || due.value <= requirement.due_date) {
+        setMessage("inspection-message", "Elige un plazo posterior al actual.", "error");
+        return;
+      }
+      requirementUpdate(requirement, { action: "extend", due_date: due.value }, "Plazo extendido.");
+    });
+    actions.append(resolve, inputLabel("Nuevo plazo", due), extend);
+  }
+  if (data.inspections.some(item => item.id === requirement.inspection_id)) {
+    const open = element("button", "Ver inspección", "button secondary small");
+    open.type = "button";
+    open.addEventListener("click", () => selectInspection(requirement.inspection_id));
+    actions.append(open);
+  }
+  detail.append(actions);
+}
+
+function calendarEvents(key) {
+  if (calendarMode === "requirements") {
+    return (data?.requirements || []).filter(item => item.due_date === key).map(item => ({
+      id: item.inspection_id, time: item.resolved_at ? "✓ Resuelto" : "Plazo", title: item.text,
+      stage: item.resolved_at ? "requirement-resolved" : "requirement",
+      tooltip: `${item.company_name || item.case_number || `Inspección #${item.inspection_id}`} · ${item.inspector_name || ""}`,
+      source: item,
+    }));
+  }
+  return (data?.calendar || data?.inspections || [])
+    .filter(inspection => inspection.scheduled_date === key)
+    .sort((a, b) => (a.scheduled_time || "").localeCompare(b.scheduled_time || ""))
+    .map(inspection => ({
+      id: inspection.id, time: inspection.scheduled_time || "",
+      title: inspection.company_name || inspection.case_number || `#${inspection.id}`, stage: inspection.stage,
+      tooltip: `${inspection.scheduled_place} · ${[inspection.inspector_name, inspection.second_inspector_name].filter(Boolean).join(" y ")}`,
+      source: inspection,
+    }));
+}
+
 function renderCalendar() {
+  byId("inspection-calendar-title").textContent = calendarMode === "requirements"
+    ? "Calendario de requerimientos" : "Calendario de inspecciones";
+  for (const button of byId("inspection-calendar-mode").querySelectorAll("[data-calendar-mode]")) {
+    button.setAttribute("aria-pressed", String(button.dataset.calendarMode === calendarMode));
+  }
   byId("inspection-month").textContent = new Intl.DateTimeFormat("es-UY", {
     month: "long", year: "numeric",
   }).format(month);
@@ -115,21 +312,22 @@ function renderCalendar() {
         const key = `${month.getFullYear()}-${String(month.getMonth() + 1).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
         cell.append(element("span", String(day), "inspection-calendar-day"));
         if (key === today) cell.classList.add("today");
-        const events = (data?.calendar || data?.inspections || [])
-          .filter(inspection => inspection.scheduled_date === key)
-          .sort((a, b) => (a.scheduled_time || "").localeCompare(b.scheduled_time || ""));
-        for (const inspection of events) {
+        for (const event of calendarEvents(key)) {
           const button = element("button", undefined, "inspection-calendar-event");
-          button.append(element("strong", inspection.scheduled_time || ""),
-            element("span", inspection.company_name || inspection.case_number || `#${inspection.id}`));
-          button.dataset.stage = inspection.stage;
-          button.classList.toggle("selected", inspection.id === selectedId);
+          button.append(element("strong", event.time), element("span", event.title));
+          button.dataset.stage = event.stage;
+          button.classList.toggle("selected", calendarMode === "requirements"
+            ? event.source.id === selectedRequirementId : event.id === selectedId);
+          if (calendarMode === "requirements") button.dataset.requirementId = String(event.source.id);
           button.type = "button";
-          const people = [inspection.inspector_name, inspection.second_inspector_name].filter(Boolean).join(" y ");
-          button.title = `${inspection.scheduled_place} · ${people}`;
-          const own = data.inspections.some(item => item.id === inspection.id);
-          if (!own) button.classList.add("other-inspector");
-          button.addEventListener("click", () => own ? selectInspection(inspection.id) : showCalendarOnly(inspection));
+          button.title = event.tooltip;
+          const own = data.inspections.some(item => item.id === event.id);
+          if (!own && calendarMode === "inspections") button.classList.add("other-inspector");
+          button.addEventListener("click", () => {
+            if (calendarMode === "requirements") showRequirement(event.source);
+            else if (own) selectInspection(event.id);
+            else showCalendarOnly(event.source);
+          });
           cell.append(button);
         }
       } else {
@@ -212,12 +410,20 @@ function renderDriverTasks() {
   }
   panel.append(list);
 }
+const postChecklistItems = [
+  "Escanear documentación y guardarla en formato digital y físico en la carpeta correspondiente",
+  "Enviar por mail el acta de inspección a Secretaría",
+  "Ingreso en ARIS (solo equipos nuevos)",
+];
 let checklistSaves = Promise.resolve();
 
 function autosaveChecklist(fieldset, inspection, key) {
   fieldset.addEventListener("change", () => {
-    const values = [...fieldset.querySelectorAll('input[type="checkbox"]')].map(input => input.checked);
+    const values = [...fieldset.querySelectorAll('input[name^="check-"]')].map(input => input.checked);
     const locomotion = fieldset.querySelector('select[name="locomotion"]');
+    const arisNa = fieldset.querySelector('input[name="aris_not_applicable"]');
+    const nextDate = fieldset.querySelector('input[name="next_inspection_date"]');
+    const mailSaved = fieldset.querySelector('input[name="send_mail_saved"]');
     const travel = locomotion && locomotion.value === "auto_miem"
       ? {
         departure_time: fieldset.querySelector('input[name="departure_time"]').value,
@@ -228,15 +434,24 @@ function autosaveChecklist(fieldset, inspection, key) {
       try {
         const payload = {
           inspection_id: inspection.id, version: inspection.version,
-          action: "save_checklist", checklist: values,
+          action: "save_checklist",
         };
+        if (key !== "send") payload.checklist = values;
+        if (mailSaved) payload.send_mail_saved = mailSaved.checked;
         if (locomotion) Object.assign(payload, { locomotion: locomotion.value }, travel);
+        if (arisNa) payload.aris_not_applicable = arisNa.checked;
+        if (nextDate) payload.next_inspection_date = nextDate.value;
         const result = await requestJson("/api/inspections/action", {
           method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify(payload),
         });
         inspection.version = result.version;
-        inspection[key] = values;
+        if (key !== "send") inspection[key] = values;
+        if (mailSaved) inspection.send_mail_saved = mailSaved.checked ? 1 : 0;
+        if (arisNa) inspection.aris_not_applicable = arisNa.checked ? 1 : 0;
+        if (nextDate) inspection.next_inspection_date = nextDate.value;
+        // Al empezar el checklist posterior ya no se puede re-coordinar.
+        if (key === "post_checklist" && postChecklistStarted(inspection)) byId("inspection-reschedule")?.remove();
         if (locomotion) {
           inspection.locomotion = locomotion.value;
           Object.assign(inspection, travel);
@@ -288,25 +503,72 @@ function travelTimes(inspection, editable, select) {
 function checklist(name, values, editable, items = null, locomotion = "", inspection = null) {
   const fieldset = element("fieldset", undefined, "inspection-checklist");
   fieldset.append(element("legend", name));
-  const labels = items || Array.from({ length: 6 }, (_, i) => `Ítem ${i + 1}`);
+  // Un checklist guardado con el formato anterior (6 casillas) se muestra con sus rótulos
+  // genéricos; si hay que volver a completarlo (por ejemplo, devuelto por el jefe), empieza vacío.
+  const mismatch = Boolean(items && values.length && values.length !== items.length);
+  const shown = mismatch && editable ? [] : values;
+  const legacy = !items || (mismatch && !editable);
+  const labels = legacy ? Array.from({ length: values.length || 6 }, (_, i) => `Ítem ${i + 1}`) : items;
   labels.forEach((text, i) => {
     const input = document.createElement("input");
     input.type = "checkbox";
     input.name = `check-${i}`;
-    input.checked = values[i] === true;
+    input.checked = shown[i] === true;
     input.disabled = !editable;
     const label = element("label");
     label.append(input, document.createTextNode(` ${text}`));
-    if (items === preChecklistItems && text === "Locomoción") {
+    if (!legacy && items === preChecklistItems && text === "Locomoción") {
       const select = locomotionSelect(locomotion, editable);
       label.append(document.createTextNode(" "), select);
       fieldset.append(label);
       if (inspection) fieldset.append(travelTimes(inspection, editable, select));
       return;
     }
+    if (!legacy && items === postChecklistItems && i === 2) {
+      const na = document.createElement("input");
+      na.type = "checkbox";
+      na.name = "aris_not_applicable";
+      na.checked = Boolean(inspection?.aris_not_applicable);
+      na.disabled = !editable;
+      const naLabel = element("label", undefined, "inspection-checklist-na");
+      naLabel.append(na, document.createTextNode(" No aplica (no es un equipo nuevo)"));
+      fieldset.append(label, naLabel);
+      return;
+    }
     fieldset.append(label);
   });
   return fieldset;
+}
+
+function sendChecklistFieldset(inspection, editable) {
+  const fieldset = element("fieldset", undefined, "inspection-checklist");
+  fieldset.append(element("legend", "Checklist de envío"));
+  const mail = document.createElement("input");
+  mail.type = "checkbox";
+  mail.name = "send_mail_saved";
+  mail.checked = Boolean(inspection.send_mail_saved);
+  mail.disabled = !editable;
+  const mailLabel = element("label");
+  mailLabel.append(mail, document.createTextNode(" Mail de envío guardado en línea de tiempo"));
+  const next = document.createElement("input");
+  next.type = "date";
+  next.name = "next_inspection_date";
+  next.value = inspection.next_inspection_date || "";
+  next.disabled = !editable;
+  const nextLabel = element("label", "Fecha de la próxima inspección ", "inspection-next-date");
+  nextLabel.append(next);
+  fieldset.append(mailLabel, nextLabel);
+  if (editable) {
+    fieldset.append(element("p", inspection.planning_item_id
+      ? "Esta fecha actualiza la próxima inspección en la planificación."
+      : "Esta inspección no está vinculada a la planificación: la fecha queda solo en la inspección.",
+    "form-help"));
+  }
+  return fieldset;
+}
+
+function postChecklist(inspection, editable) {
+  return checklist("Checklist posterior", inspection.post_checklist, editable, postChecklistItems, "", inspection);
 }
 
 function preChecklist(inspection, editable) {
@@ -425,7 +687,7 @@ function actionButton(label, action, className = "button workflow-approve") {
 }
 
 function missingPreChecklist(form) {
-  const missing = [...form.querySelectorAll('input[type="checkbox"]')]
+  const missing = [...form.querySelectorAll('input[name^="check-"]')]
     .map((input, i) => input.checked ? null : `marcar «${preChecklistItems[i]}»`).filter(Boolean);
   if (!form.elements.locomotion.value) missing.push("elegir el medio de locomoción");
   return missing;
@@ -433,6 +695,24 @@ function missingPreChecklist(form) {
 
 async function submitAction(form, inspection, action) {
   await checklistSaves;
+  if (action === "complete_post") {
+    const done = [...form.querySelectorAll('input[name^="check-"]')].map(input => input.checked);
+    done[2] = done[2] || form.elements.aris_not_applicable.checked;
+    const missing = postChecklistItems.filter((_, i) => !done[i]).map(name => `marcar «${name}»`);
+    if (missing.length) {
+      setMessage("inspection-message", `Para enviar al jefe falta: ${missing.join("; ")}.`, "error");
+      return;
+    }
+  }
+  if (action === "send") {
+    const missing = [];
+    if (!form.elements.send_mail_saved.checked) missing.push("marcar «Mail de envío guardado en línea de tiempo»");
+    if (!form.elements.next_inspection_date.value) missing.push("cargar la fecha de la próxima inspección");
+    if (missing.length) {
+      setMessage("inspection-message", `Para registrar el envío falta: ${missing.join("; ")}.`, "error");
+      return;
+    }
+  }
   if (action === "complete_pre") {
     const missing = missingPreChecklist(form);
     if (missing.length) {
@@ -446,7 +726,12 @@ async function submitAction(form, inspection, action) {
     payload.second_inspector_id = optionalId(form.elements.second_inspector_id.value);
   }
   if (action === "complete_pre" || action === "complete_post") {
-    payload.checklist = [...form.querySelectorAll('input[type="checkbox"]')].map(input => input.checked);
+    payload.checklist = [...form.querySelectorAll('input[name^="check-"]')].map(input => input.checked);
+  }
+  if (action === "complete_post") payload.aris_not_applicable = form.elements.aris_not_applicable.checked;
+  if (action === "send") {
+    payload.send_mail_saved = form.elements.send_mail_saved.checked;
+    payload.next_inspection_date = form.elements.next_inspection_date.value;
   }
   if (action === "complete_pre") {
     payload.locomotion = form.elements.locomotion.value;
@@ -485,8 +770,14 @@ async function submitAction(form, inspection, action) {
   }
 }
 
+function postChecklistStarted(inspection) {
+  return inspection.post_checklist.some(Boolean) || Boolean(inspection.aris_not_applicable) ||
+    Boolean(inspection.requirements?.length);
+}
+
 function rescheduleForm(inspection) {
   const panel = element("details", undefined, "workflow-create-panel");
+  panel.id = "inspection-reschedule";
   panel.append(element("summary", "Re-coordinar inspección"));
   const form = element("form", undefined, "workflow-form inspection-action-form");
   const fields = [
@@ -589,7 +880,7 @@ function renderActions(detail, inspection) {
     }
     if (isCoordinator(user)) return;
   }
-  if (inspector && ["post_inspection", "chief_review", "send"].includes(inspection.stage)) {
+  if (inspector && inspection.stage === "post_inspection" && !postChecklistStarted(inspection)) {
     detail.append(rescheduleForm(inspection));
   }
   const form = element("form", undefined, "workflow-form inspection-action-form");
@@ -618,9 +909,9 @@ function renderActions(detail, inspection) {
     }
     form.append(actionButton("Completar checklist y agendar", "complete_pre"));
   } else if (inspection.stage === "post_inspection" && inspector) {
-    const post = checklist("Checklist posterior", inspection.post_checklist, true);
+    const post = postChecklist(inspection, true);
     autosaveChecklist(post, inspection, "post_checklist");
-    form.append(post, actionButton("Enviar checklist al jefe", "complete_post"));
+    form.append(post, requirementsSection(inspection, true), actionButton("Enviar checklist al jefe", "complete_post"));
   } else if (inspection.stage === "chief_review" && chief) {
     const comment = document.createElement("textarea");
     comment.name = "comment";
@@ -630,7 +921,9 @@ function renderActions(detail, inspection) {
       actionButton("Aprobar y enviar al inspector", "approve"),
       actionButton("Devolver para corrección", "return_post", "button workflow-observe"));
   } else if (inspection.stage === "send" && inspector) {
-    form.append(actionButton("Registrar envío", "send"));
+    const sendChecklist = sendChecklistFieldset(inspection, true);
+    autosaveChecklist(sendChecklist, inspection, "send");
+    form.append(sendChecklist, actionButton("Registrar envío", "send"));
   } else {
     return;
   }
@@ -641,8 +934,14 @@ function renderActions(detail, inspection) {
   detail.append(form);
 }
 
+function isLeadInspector(inspection) {
+  const user = data.current_user;
+  return user.role === "admin" || (user.workflow_role === "inspeccion" && user.id === inspection.inspector_id);
+}
+
 function selectInspection(id) {
   selectedId = id;
+  selectedRequirementId = null;
   const inspection = data.inspections.find(item => item.id === id);
   if (!inspection) return;
   for (const row of byId("inspection-rows").querySelectorAll("[data-inspection-id]")) {
@@ -680,7 +979,13 @@ function selectInspection(id) {
   detail.replaceChildren(summary, fields);
   if (inspection.pre_checklist.length) detail.append(preChecklist(inspection, false));
   if (inspection.post_checklist.length && inspection.stage !== "post_inspection") {
-    detail.append(checklist("Checklist posterior", inspection.post_checklist, false));
+    detail.append(postChecklist(inspection, false));
+  }
+  if (inspection.stage === "completed" && (inspection.send_mail_saved || inspection.next_inspection_date)) {
+    detail.append(sendChecklistFieldset(inspection, false));
+  }
+  if (inspection.requirements?.length && (inspection.stage !== "post_inspection" || !isLeadInspector(inspection))) {
+    detail.append(requirementsSection(inspection, false));
   }
   renderActions(detail, inspection);
   if (inspection.events.length) {
@@ -700,12 +1005,41 @@ function selectInspection(id) {
 
 let listFilter = "active";
 
+// Una inspección finalizada con requerimientos sin resolver va a su propia sub pestaña;
+// cuando se resuelven todos, vuelve a "Finalizadas".
+function listGroup(inspection) {
+  if (inspection.stage !== "completed") return "active";
+  return inspection.pending_requirements > 0 ? "completed_pending" : "completed";
+}
+
+const searchFields = [
+  "company_name", "rut", "practice", "inspector_name", "second_inspector_name", "case_number",
+  "entity_name", "city", "address", "equipment_model", "inspection_type", "contact_details",
+  "email", "phone", "scheduled_place",
+];
+
+function normalizeSearch(value) {
+  return String(value || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+}
+
+// Cada palabra buscada tiene que aparecer en algún dato de la inspección.
+function matchesSearch(inspection, words) {
+  const text = normalizeSearch([
+    ...searchFields.map(field => inspection[field]),
+    `#${inspection.id}`, stages[inspection.stage], requestTypes[inspection.request_type],
+  ].join(" "));
+  return words.every(word => text.includes(word));
+}
+
 function renderInspectionList() {
+  const words = normalizeSearch(byId("inspection-search").value).split(/\s+/).filter(Boolean);
+  const searching = words.length > 0;
+  byId("inspection-search-note").classList.toggle("hidden", !searching);
   for (const button of byId("inspection-list-filter").querySelectorAll("[data-inspection-filter]")) {
-    button.setAttribute("aria-pressed", String(button.dataset.inspectionFilter === listFilter));
+    button.setAttribute("aria-pressed", String(!searching && button.dataset.inspectionFilter === listFilter));
   }
   renderInspections(data.inspections.filter(item =>
-    (item.stage === "completed") === (listFilter === "completed")));
+    searching ? matchesSearch(item, words) : listGroup(item) === listFilter));
 }
 
 function renderInspections(inspections) {
@@ -1096,12 +1430,22 @@ export async function loadInspections() {
 
 export function initInspections() {
   renderCalendar();
+  for (const button of byId("inspection-calendar-mode").querySelectorAll("[data-calendar-mode]")) {
+    button.addEventListener("click", () => {
+      calendarMode = button.dataset.calendarMode;
+      renderCalendar();
+    });
+  }
   for (const button of byId("inspection-list-filter").querySelectorAll("[data-inspection-filter]")) {
     button.addEventListener("click", () => {
       listFilter = button.dataset.inspectionFilter;
+      byId("inspection-search").value = "";
       if (data) renderInspectionList();
     });
   }
+  byId("inspection-search").addEventListener("input", () => {
+    if (data) renderInspectionList();
+  });
   for (const button of byId("inspection-subtabs").querySelectorAll("[data-inspection-view]")) {
     button.addEventListener("click", () => showInspectionView(button.dataset.inspectionView));
   }

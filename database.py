@@ -1,3 +1,4 @@
+import json
 import sqlite3
 from datetime import datetime, timezone
 
@@ -71,6 +72,28 @@ def _initialize_inspections(connection: sqlite3.Connection) -> None:
         "actor_id INTEGER NOT NULL REFERENCES workflow_users(id), "
         "action TEXT NOT NULL, comment TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL)"
     )
+    # Requerimientos que el inspector agrega en el checklist posterior, con su plazo.
+    connection.execute(
+        "CREATE TABLE IF NOT EXISTS inspection_requirements ("
+        "id INTEGER PRIMARY KEY, inspection_id INTEGER NOT NULL REFERENCES inspections(id), "
+        "text TEXT NOT NULL, due_date TEXT NOT NULL, "
+        "created_by INTEGER NOT NULL REFERENCES workflow_users(id), created_at TEXT NOT NULL)"
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_inspection_requirements_inspection "
+        "ON inspection_requirements(inspection_id)"
+    )
+    requirement_columns = {
+        row["name"] for row in connection.execute("PRAGMA table_info(inspection_requirements)")
+    }
+    if "resolved_at" not in requirement_columns:
+        connection.execute(
+            "ALTER TABLE inspection_requirements ADD COLUMN resolved_at TEXT NOT NULL DEFAULT ''"
+        )
+        connection.execute(
+            "ALTER TABLE inspection_requirements ADD COLUMN resolved_by INTEGER "
+            "REFERENCES workflow_users(id)"
+        )
     # Historial detallado (se agregan columnas sin tocar los registros existentes).
     event_columns = {
         row["name"] for row in connection.execute("PRAGMA table_info(inspection_events)")
@@ -170,6 +193,34 @@ def _initialize_planning(connection: sqlite3.Connection, inspection_columns) -> 
         )
         connection.execute(
             "ALTER TABLE inspections ADD COLUMN driver_name TEXT NOT NULL DEFAULT ''"
+        )
+    # Los checklists cambiaron de 6 casillas genéricas a 3 ítems con nombre. En las etapas
+    # donde todavía se completan, las 6 casillas viejas se vacían para no mostrarlas con
+    # nombres que no les corresponden; en las demás se conservan (se ven como "Ítem N").
+    for column, stage in (("pre_checklist", "pre_inspection"), ("post_checklist", "post_inspection")):
+        for row in connection.execute(
+            f"SELECT id, {column} AS value FROM inspections WHERE stage = ?", (stage,),
+        ).fetchall():
+            try:
+                legacy = len(json.loads(row["value"] or "[]")) == 6
+            except ValueError:
+                legacy = True
+            if legacy:
+                connection.execute(f"UPDATE inspections SET {column} = '[]' WHERE id = ?", (row["id"],))
+    if "send_mail_saved" not in inspection_columns:
+        # Checklist de envío: el mail de envío quedó guardado en la línea de tiempo.
+        connection.execute(
+            "ALTER TABLE inspections ADD COLUMN send_mail_saved INTEGER NOT NULL DEFAULT 0"
+        )
+    if "next_inspection_date" not in inspection_columns:
+        # Fecha de la próxima inspección, cargada en el checklist de envío.
+        connection.execute(
+            "ALTER TABLE inspections ADD COLUMN next_inspection_date TEXT NOT NULL DEFAULT ''"
+        )
+    if "aris_not_applicable" not in inspection_columns:
+        # Checklist posterior: el ingreso en ARIS solo corresponde a equipos nuevos.
+        connection.execute(
+            "ALTER TABLE inspections ADD COLUMN aris_not_applicable INTEGER NOT NULL DEFAULT 0"
         )
     if "departure_time" not in inspection_columns:
         # Horarios del viaje en Auto MIEM, para coordinar el chofer.

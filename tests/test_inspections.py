@@ -83,6 +83,11 @@ class InspectionTests(unittest.TestCase):
         })
         return handler.response
 
+    def requirement(self, user, requirement_id, action, **kwargs):
+        handler = Handler(self.users[user])
+        handler.act_on_requirement({"requirement_id": requirement_id, "action": action, **kwargs})
+        return handler.response
+
     def data(self, user):
         handler = Handler(self.users[user])
         handler.get_inspections()
@@ -106,20 +111,21 @@ class InspectionTests(unittest.TestCase):
             self.assertEqual(result["pre_checklist"], pre)
         self.assertEqual(self.data("other")["inspections"], [])
         self.assertEqual(self.data("lawyer")["inspections"], [])
-        post = [False, True, False, True, False, True]
-        self.assertEqual(self.act("inspector", inspection_id, 2, "complete_post", checklist=post)[0], 200)
+        post = [True, True, False]
+        self.assertEqual(self.act("inspector", inspection_id, 2, "complete_post", checklist=post,
+                                  aris_not_applicable=True)[0], 200)
         with self.assertRaisesRegex(ValueError, "motivo"):
             self.act("chief", inspection_id, 3, "return_post", comment="  ")
         self.assertEqual(self.act("chief", inspection_id, 3, "return_post", comment="Corregir ítem")[0], 200)
         self.assertEqual(self.data("inspector")["inspections"][0]["post_checklist"], post)
-        self.assertEqual(self.act("inspector", inspection_id, 4, "complete_post", checklist=[True] * 6)[0], 200)
+        self.assertEqual(self.act("inspector", inspection_id, 4, "complete_post", checklist=[True] * 3)[0], 200)
         self.assertEqual(self.act("chief", inspection_id, 5, "approve", comment="Revisado")[0], 200)
-        self.assertEqual(self.act("chief", inspection_id, 6, "send")[0], 403)
-        self.assertEqual(self.act("inspector", inspection_id, 6, "send")[0], 200)
+        self.assertEqual(self.act("chief", inspection_id, 6, "send", send_mail_saved=True, next_inspection_date="2027-12-01")[0], 403)
+        self.assertEqual(self.act("inspector", inspection_id, 6, "send", send_mail_saved=True, next_inspection_date="2027-12-01")[0], 200)
         database.initialize_db()
         result = self.data("chief")["inspections"][0]
         self.assertEqual(result["stage"], "completed")
-        self.assertEqual(result["post_checklist"], [True] * 6)
+        self.assertEqual(result["post_checklist"], [True] * 3)
         self.assertEqual([event["action"] for event in result["events"]],
                          ["created", "assign", "complete_pre", "complete_post",
                           "return_post", "complete_post", "approve", "send"])
@@ -150,9 +156,9 @@ class InspectionTests(unittest.TestCase):
                      scheduled_date="2026-11-24", scheduled_time="09:30", scheduled_place="Centro")
         self.act("inspector", inspection_id, 3, "complete_pre", checklist=[True] * 3, locomotion="taxi",
                  scheduled_date="2026-11-24", scheduled_time="09:30", scheduled_place="Centro")
-        self.assertEqual(self.act("inspector", inspection_id, 4, "save_checklist", checklist=[True] * 6)[0], 200)
+        self.assertEqual(self.act("inspector", inspection_id, 4, "save_checklist", checklist=[True] * 3)[0], 200)
         saved = self.data("inspector")["inspections"][0]
-        self.assertEqual((saved["pre_checklist"], saved["post_checklist"]), ([True] * 3, [True] * 6))
+        self.assertEqual((saved["pre_checklist"], saved["post_checklist"]), ([True] * 3, [True] * 3))
 
     def test_auto_miem_creates_driver_task_without_blocking(self):
         inspection_id = self.create()
@@ -179,7 +185,7 @@ class InspectionTests(unittest.TestCase):
                          ("post_inspection", "coordinated", "Juan Pérez"))
         self.assertIn("Chofer: Pendiente de coordinar → Chofer coordinado", mine["events"][-1]["details_text"])
         # Coordinación no puede mover las etapas de la inspección.
-        self.assertEqual(self.act("coordinator", inspection_id, 4, "complete_post", checklist=[True] * 6)[0], 403)
+        self.assertEqual(self.act("coordinator", inspection_id, 4, "complete_post", checklist=[True] * 3)[0], 403)
 
     def test_auto_miem_travel_times_are_saved_and_cleared(self):
         inspection_id = self.create()
@@ -217,7 +223,7 @@ class InspectionTests(unittest.TestCase):
         self.act("chief", in_progress, 0, "assign", inspector_id=self.users["inspector"]["id"])
         self.assertEqual(self.data("other")["inspections"], [])
         self.act("chief", inspection_id, 5, "approve")
-        self.act("inspector", inspection_id, 6, "send")
+        self.act("inspector", inspection_id, 6, "send", send_mail_saved=True, next_inspection_date="2027-12-01")
         seen = self.data("other")["inspections"]
         self.assertEqual([(item["id"], item["stage"]) for item in seen], [(inspection_id, "completed")])
         self.assertTrue(seen[0]["events"])
@@ -247,6 +253,207 @@ class InspectionTests(unittest.TestCase):
         self.assertEqual((last["action"], last["comment"]), ("reschedule", "Pidió otro día"))
         self.assertIn("Fecha de inspección: 2026-12-01 → 2026-12-05", last["details_text"])
         self.assertIn("Chofer coordinado → Pendiente de coordinar", last["details_text"])
+
+    def test_post_checklist_must_be_complete_or_aris_not_applicable(self):
+        inspection_id = self.create()
+        self.act("chief", inspection_id, 0, "assign", inspector_id=self.users["inspector"]["id"])
+        self.act("inspector", inspection_id, 1, "complete_pre", checklist=[True] * 3, locomotion="taxi",
+                 scheduled_date="2026-12-01", scheduled_time="10:00", scheduled_place="Sala")
+        self.assertEqual(self.act("inspector", inspection_id, 2, "save_checklist", checklist=[True, False, False],
+                                  aris_not_applicable=True)[0], 200)
+        saved = self.data("inspector")["inspections"][0]
+        self.assertEqual((saved["post_checklist"], saved["aris_not_applicable"]), ([True, False, False], 1))
+        with self.assertRaisesRegex(ValueError, "Enviar por mail"):
+            self.act("inspector", inspection_id, 3, "complete_post", checklist=[True, False, False],
+                     aris_not_applicable=True)
+        with self.assertRaisesRegex(ValueError, "ARIS"):
+            self.act("inspector", inspection_id, 3, "complete_post", checklist=[True, True, False])
+        with self.assertRaises(ValueError):
+            self.act("inspector", inspection_id, 3, "complete_post", checklist=[True] * 3, aris_not_applicable="si")
+        self.assertEqual(self.act("inspector", inspection_id, 3, "complete_post", checklist=[True, True, False],
+                                  aris_not_applicable=True)[0], 200)
+        self.assertEqual(self.data("inspector")["inspections"][0]["stage"], "chief_review")
+
+    def test_requirements_are_added_one_by_one_and_visible_by_role(self):
+        mine = self.create()
+        theirs = self.create()
+        for inspection_id, name in ((mine, "inspector"), (theirs, "other")):
+            self.act("chief", inspection_id, 0, "assign", inspector_id=self.users[name]["id"])
+        # Solo se agregan en la etapa del checklist posterior.
+        self.assertEqual(self.act("inspector", mine, 1, "add_requirement", requirement_text="Blindaje",
+                                  due_date="2026-12-10")[0], 409)
+        for inspection_id, name in ((mine, "inspector"), (theirs, "other")):
+            self.act(name, inspection_id, 1, "complete_pre", checklist=[True] * 3, locomotion="taxi",
+                     scheduled_date="2026-12-01", scheduled_time="10:00", scheduled_place="Sala")
+        for invalid in (dict(requirement_text=" ", due_date="2026-12-10"),
+                        dict(requirement_text="Blindaje", due_date="2026-02-30")):
+            with self.subTest(**invalid), self.assertRaises(ValueError):
+                self.act("inspector", mine, 2, "add_requirement", **invalid)
+        self.assertEqual(self.act("other", mine, 2, "add_requirement", requirement_text="x",
+                                  due_date="2026-12-10")[0], 403)
+        self.assertEqual(self.act("inspector", mine, 2, "add_requirement", requirement_text=" Blindaje ",
+                                  due_date="2026-12-10")[0], 200)
+        self.assertEqual(self.act("inspector", mine, 3, "add_requirement", requirement_text="Dosímetros",
+                                  due_date="2026-12-20")[0], 200)
+        self.act("other", theirs, 2, "add_requirement", requirement_text="Señalización", due_date="2026-12-15")
+        seen = self.data("inspector")
+        self.assertEqual([item["text"] for item in seen["requirements"]], ["Blindaje", "Dosímetros"])
+        self.assertEqual(len(seen["inspections"][0]["requirements"]), 2)
+        self.assertEqual(seen["inspections"][0]["stage"], "post_inspection")
+        self.assertEqual([item["text"] for item in self.data("chief")["requirements"]],
+                         ["Blindaje", "Señalización", "Dosímetros"])
+        first = seen["requirements"][0]["id"]
+        self.assertEqual(self.act("inspector", mine, 4, "remove_requirement", requirement_id=first)[0], 200)
+        events = self.data("inspector")["inspections"][0]["events"]
+        self.assertIn("Requerimiento: (vacío) → Blindaje (plazo 2026-12-10)", events[3]["details_text"])
+        self.assertEqual(events[-1]["action"], "remove_requirement")
+        self.assertEqual([item["text"] for item in self.data("inspector")["requirements"]], ["Dosímetros"])
+
+    def test_reschedule_is_closed_once_post_checklist_starts(self):
+        inspection_id = self.create()
+        self.act("chief", inspection_id, 0, "assign", inspector_id=self.users["inspector"]["id"])
+        self.act("inspector", inspection_id, 1, "complete_pre", checklist=[True] * 3, locomotion="taxi",
+                 scheduled_date="2026-12-01", scheduled_time="10:00", scheduled_place="Sala")
+        new = dict(scheduled_date="2026-12-05", scheduled_time="09:00", scheduled_place="Sala")
+        self.assertEqual(self.act("inspector", inspection_id, 2, "reschedule", **new)[0], 200)
+        self.act("inspector", inspection_id, 3, "save_checklist", checklist=[True, False, False])
+        with self.assertRaisesRegex(ValueError, "checklist posterior"):
+            self.act("inspector", inspection_id, 4, "reschedule", scheduled_date="2026-12-06",
+                     scheduled_time="09:00", scheduled_place="Sala")
+        self.act("inspector", inspection_id, 4, "save_checklist", checklist=[False] * 3)
+        self.act("inspector", inspection_id, 5, "add_requirement", requirement_text="Blindaje", due_date="2026-12-10")
+        with self.assertRaises(ValueError):
+            self.act("inspector", inspection_id, 6, "reschedule", scheduled_date="2026-12-06",
+                     scheduled_time="09:00", scheduled_place="Sala")
+
+    def test_requirement_is_resolved_or_extended_from_calendar(self):
+        inspection_id = self.create()
+        self.act("chief", inspection_id, 0, "assign", inspector_id=self.users["inspector"]["id"])
+        self.act("inspector", inspection_id, 1, "complete_pre", checklist=[True] * 3, locomotion="taxi",
+                 scheduled_date="2026-12-01", scheduled_time="10:00", scheduled_place="Sala")
+        self.act("inspector", inspection_id, 2, "add_requirement", requirement_text="Blindaje", due_date="2026-12-10")
+        req = self.data("inspector")["requirements"][0]["id"]
+        self.assertEqual(self.requirement("other", req, "resolve")[0], 403)
+        self.assertEqual(self.requirement("coordinator", req, "resolve")[0], 403)
+        for due in ("2026-12-09", "2026-12-10", "mañana"):
+            with self.subTest(due=due), self.assertRaises(ValueError):
+                self.requirement("inspector", req, "extend", due_date=due)
+        self.assertEqual(self.requirement("inspector", req, "extend", due_date="2026-12-20")[0], 200)
+        self.assertEqual(self.data("chief")["requirements"][0]["due_date"], "2026-12-20")
+        self.assertEqual(self.requirement("chief", req, "resolve")[0], 200)
+        resolved = self.data("inspector")["requirements"][0]
+        self.assertTrue(resolved["resolved_at"])
+        with self.assertRaises(ValueError):
+            self.requirement("inspector", req, "extend", due_date="2026-12-30")
+        self.assertEqual(self.requirement("inspector", req, "reopen")[0], 200)
+        self.assertEqual(self.data("inspector")["requirements"][0]["resolved_at"], "")
+        actions = [event["action"] for event in self.data("inspector")["inspections"][0]["events"]]
+        self.assertEqual(actions[-3:], ["extend_requirement", "resolve_requirement", "reopen_requirement"])
+        self.assertEqual(self.requirement("inspector", 9999, "resolve")[0], 404)
+
+    def test_send_checklist_is_required_and_updates_planning_row(self):
+        connection = database.connect_db()
+        item_id = connection.execute(
+            "INSERT INTO planning_items (item_key, sheet_institution, sheet_next_inspection) "
+            "VALUES ('k1', 'Hospital', '2027-03-01')"
+        ).lastrowid
+        connection.commit()
+        connection.close()
+        handler = Handler(self.users["chief"])
+        handler.create_inspection({"company_name": "Hospital", "planning_item_id": item_id,
+                                   "inspector_id": self.users["inspector"]["id"]})
+        self.assertEqual(handler.response[0], 201, handler.response)
+        inspection_id = handler.response[1]["id"]
+        v = self.data("inspector")["inspections"][0]["version"]
+        self.act("inspector", inspection_id, v, "complete_pre", checklist=[True] * 3, locomotion="taxi",
+                 scheduled_date="2026-12-01", scheduled_time="10:00", scheduled_place="Sala")
+        self.act("inspector", inspection_id, v + 1, "complete_post", checklist=[True] * 3)
+        self.act("chief", inspection_id, v + 2, "approve")
+        v += 3
+        with self.assertRaises(ValueError):
+            self.act("inspector", inspection_id, v, "save_checklist", next_inspection_date="2027-02-30")
+        self.act("inspector", inspection_id, v, "save_checklist", next_inspection_date="2027-11-15")
+        with self.assertRaisesRegex(ValueError, "Mail de envío"):
+            self.act("inspector", inspection_id, v + 1, "send", next_inspection_date="2027-11-15")
+        with self.assertRaisesRegex(ValueError, "próxima inspección"):
+            self.act("inspector", inspection_id, v + 1, "send", send_mail_saved=True)
+
+        def planning():
+            connection = database.connect_db()
+            try:
+                row = connection.execute("SELECT manual_next_inspection FROM planning_items WHERE id = ?",
+                                         (item_id,)).fetchone()
+                event = connection.execute("SELECT action, details FROM planning_events WHERE item_id = ? "
+                                           "ORDER BY id DESC", (item_id,)).fetchone()
+                return row["manual_next_inspection"], event
+            finally:
+                connection.close()
+
+        # El autoguardado no toca la planificación: recién se actualiza al registrar el envío.
+        manual, event = planning()
+        self.assertIsNone(manual)
+        self.assertNotEqual(event and event["action"], "inspection_next")
+        self.assertEqual(self.act("inspector", inspection_id, v + 1, "send", send_mail_saved=True,
+                                  next_inspection_date="2027-11-15")[0], 200)
+        manual, event = planning()
+        self.assertEqual((manual, event["action"]), ("2027-11-15", "inspection_next"))
+        self.assertIn("15/11/2027", event["details"])
+        done = self.data("inspector")["inspections"][0]
+        self.assertEqual((done["stage"], done["send_mail_saved"]), ("completed", 1))
+
+    def test_requirements_visibility_and_removal_rules(self):
+        inspection_id = self.create()
+        self.act("chief", inspection_id, 0, "assign", inspector_id=self.users["inspector"]["id"],
+                 second_inspector_id=self.users["other"]["id"])
+        self.act("inspector", inspection_id, 1, "complete_pre", checklist=[True] * 3, locomotion="taxi",
+                 scheduled_date="2026-12-01", scheduled_time="10:00", scheduled_place="Sala")
+        self.act("inspector", inspection_id, 2, "add_requirement", requirement_text="Blindaje", due_date="2026-12-10")
+        # El segundo inspector y Secretaría también ven los requerimientos.
+        self.assertEqual(len(self.data("other")["inspections"][0]["requirements"]), 1)
+        self.assertEqual(len(self.data("secretary")["requirements"]), 1)
+        self.assertEqual(self.data("coordinator")["requirements"], [])
+        with self.assertRaises(ValueError):
+            self.act("inspector", inspection_id, 3, "remove_requirement", requirement_id=[1])
+        req = self.data("inspector")["requirements"][0]["id"]
+        self.requirement("chief", req, "resolve")
+        with self.assertRaisesRegex(ValueError, "resuelto"):
+            self.act("inspector", inspection_id, 3, "remove_requirement", requirement_id=req)
+
+    def test_legacy_six_box_checklists_are_cleared_while_in_progress(self):
+        pre_id, post_id, done_id = self.create(), self.create(), self.create()
+        connection = database.connect_db()
+        legacy = "[true, false, false, false, false, false]"
+        for inspection_id, stage in ((pre_id, "pre_inspection"), (post_id, "post_inspection"),
+                                     (done_id, "completed")):
+            connection.execute("UPDATE inspections SET stage = ?, pre_checklist = ?, post_checklist = ? "
+                               "WHERE id = ?", (stage, legacy, legacy, inspection_id))
+        connection.commit()
+        connection.close()
+        database.initialize_db()
+        connection = database.connect_db()
+        rows = {row["id"]: (row["pre_checklist"], row["post_checklist"]) for row in connection.execute(
+            "SELECT id, pre_checklist, post_checklist FROM inspections")}
+        connection.close()
+        self.assertEqual(rows[pre_id], ("[]", legacy))
+        self.assertEqual(rows[post_id], (legacy, "[]"))
+        self.assertEqual(rows[done_id], (legacy, legacy))
+
+    def test_pending_requirements_are_counted_for_finished_inspections(self):
+        inspection_id = self.create()
+        self.act("chief", inspection_id, 0, "assign", inspector_id=self.users["inspector"]["id"])
+        self.act("inspector", inspection_id, 1, "complete_pre", checklist=[True] * 3, locomotion="taxi",
+                 scheduled_date="2026-12-01", scheduled_time="10:00", scheduled_place="Sala")
+        self.act("inspector", inspection_id, 2, "add_requirement", requirement_text="Blindaje", due_date="2026-12-10")
+        self.act("inspector", inspection_id, 3, "complete_post", next_inspection_date="2027-12-01",
+                 checklist=[True] * 3)
+        self.act("chief", inspection_id, 4, "approve")
+        self.act("inspector", inspection_id, 5, "send", send_mail_saved=True, next_inspection_date="2027-12-01")
+        # Otro inspector no ve el requerimiento, pero sí que la finalizada tiene uno pendiente.
+        seen = self.data("other")["inspections"][0]
+        self.assertEqual((seen["stage"], seen["requirements"], seen["pending_requirements"]), ("completed", [], 1))
+        req = self.data("inspector")["requirements"][0]["id"]
+        self.requirement("inspector", req, "resolve")
+        self.assertEqual(self.data("other")["inspections"][0]["pending_requirements"], 0)
 
     def test_other_locomotion_clears_driver_task(self):
         inspection_id = self.create()
@@ -322,9 +529,10 @@ class InspectionTests(unittest.TestCase):
         self.act("chief", inspection_id, 0, "assign", inspector_id=self.users["inspector"]["id"])
         self.act("inspector", inspection_id, 1, "complete_pre", checklist=[True] * 3,
                  locomotion="auto_miem", scheduled_date="2026-12-01", scheduled_time="10:00", scheduled_place="Sala 1")
-        self.act("inspector", inspection_id, 2, "complete_post", checklist=[False] * 6)
+        self.act("inspector", inspection_id, 2, "complete_post", checklist=[True, True, False],
+                 aris_not_applicable=True)
         self.act("chief", inspection_id, 3, "return_post", comment="Revisar")
-        self.act("inspector", inspection_id, 4, "complete_post", checklist=[True] * 6)
+        self.act("inspector", inspection_id, 4, "complete_post", checklist=[True] * 3)
         return inspection_id
 
     def test_history_records_what_changed_and_stages(self):
@@ -334,7 +542,7 @@ class InspectionTests(unittest.TestCase):
         self.assertEqual(events[1]["details_text"], "Inspector líder: (vacío) → inspector")
         self.assertIn("Fecha de inspección: (vacío) → 2026-12-01", events[2]["details_text"])
         self.assertIn("Checklist previo: (vacío) → 3 de 3 casillas marcadas", events[2]["details_text"])
-        self.assertIn("0 de 6 casillas marcadas → 6 de 6 casillas marcadas", events[5]["details_text"])
+        self.assertIn("2 de 3 casillas marcadas → 3 de 3 casillas marcadas", events[5]["details_text"])
         connection = database.connect_db()
         try:
             rows = connection.execute(
@@ -397,7 +605,7 @@ class InspectionTests(unittest.TestCase):
                       for index, heading in enumerate(headings, start=1)}
             self.assertEqual(second["Inspector líder"], "inspector")
             self.assertEqual(second["Etapa"], "Revisión de Jefe de Inspección")
-            self.assertEqual(second["Checklist posterior"], "6 de 6 casillas marcadas")
+            self.assertEqual(second["Checklist posterior"], "3 de 3 casillas marcadas")
             history = workbook["Historial"]
             self.assertEqual(history.max_row, 1 + 1 + 6)
             for row in history.iter_rows():
@@ -472,7 +680,7 @@ class InspectionTests(unittest.TestCase):
         self.assertEqual([item["id"] for item in seen], [inspection_id])
         self.assertEqual(seen[0]["scheduled_date"], "2026-12-03")
         self.assertTrue(seen[0]["events"])
-        self.assertEqual(self.act("other", inspection_id, 2, "complete_post", checklist=[True] * 6)[0], 403)
+        self.assertEqual(self.act("other", inspection_id, 2, "complete_post", checklist=[True] * 3)[0], 403)
         self.assertEqual(self.act("other", inspection_id, 2, "set_second",
                                   second_inspector_id=None)[0], 403)
         workbook = self.export("other")

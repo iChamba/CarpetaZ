@@ -93,9 +93,13 @@
         <div class="inspection-column">
           <section class="inspection-list">
             <div class="inspection-section-heading"><h3>Inspecciones</h3><span class="inspection-count" id="inspection-count"></span></div>
+            <input type="search" id="inspection-search" class="inspection-search" maxlength="120"
+              placeholder="Buscar por institución, RUT, práctica, inspector, trámite, ciudad…" aria-label="Buscar inspecciones">
+            <p class="form-help hidden" id="inspection-search-note">Buscando en todas las inspecciones (en curso y finalizadas).</p>
             <div class="workflow-case-tabs" id="inspection-list-filter" role="group" aria-label="Filtrar inspecciones">
               <button type="button" class="workflow-case-tab" data-inspection-filter="active" aria-pressed="true">En curso</button>
               <button type="button" class="workflow-case-tab" data-inspection-filter="completed" aria-pressed="false">Finalizadas (de todos)</button>
+              <button type="button" class="workflow-case-tab" data-inspection-filter="completed_pending" aria-pressed="false">Finalizadas con requerimientos</button>
             </div>
             <div class="table-wrap">
               <table class="workflow-table">
@@ -106,6 +110,10 @@
           </section>
           <section class="inspection-calendar" aria-labelledby="inspection-calendar-title">
             <div class="inspection-section-heading"><h3 id="inspection-calendar-title">Calendario de inspecciones</h3></div>
+            <div class="workflow-case-tabs" id="inspection-calendar-mode" role="group" aria-label="Tipo de calendario">
+              <button type="button" class="workflow-case-tab" data-calendar-mode="inspections" aria-pressed="true">Inspecciones</button>
+              <button type="button" class="workflow-case-tab" data-calendar-mode="requirements" aria-pressed="false">Calendario de requerimientos</button>
+            </div>
             <div class="inspection-calendar-nav">
               <button type="button" class="inspection-calendar-arrow" id="inspection-prev-month" aria-label="Mes anterior" title="Mes anterior">‹</button>
               <strong id="inspection-month" aria-live="polite"></strong>

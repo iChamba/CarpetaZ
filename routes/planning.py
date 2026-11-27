@@ -37,6 +37,7 @@ ACTION_LABELS = {
     "edit": "Datos corregidos", "restore": "Restaurados los datos de las planillas",
     "scheduled": "Inspección agendada",
     "sheet_match": "La planilla ahora coincide con la corrección",
+    "inspection_next": "Próxima inspección actualizada desde el checklist de envío",
 }
 SORT_LABELS = {
     "next": "Próxima inspección", "last": "Última inspección",

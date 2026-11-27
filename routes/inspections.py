@@ -38,6 +38,10 @@ FIELD_LABELS = {
     "scheduled_date": "Fecha de inspección",
     "scheduled_time": "Hora de inspección", "scheduled_place": "Lugar de inspección",
     "pre_checklist": "Checklist previo", "post_checklist": "Checklist posterior",
+    "aris_not_applicable": "ARIS no aplica",
+    "next_inspection_date": "Próxima inspección",
+    "send_mail_saved": "Mail de envío guardado en línea de tiempo",
+    "requirement": "Requerimiento",
     "locomotion": "Locomoción",
     "driver_status": "Chofer", "driver_name": "Chofer asignado",
     "departure_time": "Hora de salida", "arrival_time": "Hora aprox. de llegada",
@@ -46,7 +50,12 @@ DRIVER_STATUS = {"pending": "Pendiente de coordinar", "coordinated": "Chofer coo
 LOCOMOTION_OPTIONS = {"auto_miem": "Auto MIEM", "taxi": "Taxi", "propios": "Medios propios"}
 PRE_CHECKLIST_ITEMS = ("Coordinar inspección con el usuario", "Locomoción", "Preparar documentación")
 PRE_CHECKLIST_SIZE = len(PRE_CHECKLIST_ITEMS)
-POST_CHECKLIST_SIZE = 6
+POST_CHECKLIST_ITEMS = (
+    "Escanear documentación y guardarla en formato digital y físico en la carpeta correspondiente",
+    "Enviar por mail el acta de inspección a Secretaría",
+    "Ingreso en ARIS (solo equipos nuevos)",
+)
+POST_CHECKLIST_SIZE = len(POST_CHECKLIST_ITEMS)
 STAGE_LABELS = {
     "assignment": "Asignación de inspector",
     "pre_inspection": "Checklist previo y agenda",
@@ -65,6 +74,11 @@ ACTION_LABELS = {
     "save_checklist": "Checklist guardado",
     "coordinate_driver": "Chofer coordinado",
     "reschedule": "Inspección re-coordinada",
+    "add_requirement": "Requerimiento agregado",
+    "remove_requirement": "Requerimiento eliminado",
+    "resolve_requirement": "Requerimiento resuelto",
+    "reopen_requirement": "Requerimiento reabierto",
+    "extend_requirement": "Plazo de requerimiento extendido",
 }
 REQUEST_TYPES = {"inicial": "Autorización inicial", "renovacion": "Renovación"}
 
@@ -81,6 +95,8 @@ def _display(key: str, value) -> str:
         return _checklist_summary(value)
     if key == "request_type":
         return REQUEST_TYPES.get(value, value or "")
+    if key in ("aris_not_applicable", "send_mail_saved"):
+        return "Sí" if value else "No"
     if key == "locomotion":
         return LOCOMOTION_OPTIONS.get(value, value or "")
     if key == "driver_status":
@@ -213,6 +229,48 @@ def _link_planning_entity(connection, item_id, entity_name, actor_id, now, inspe
         )
 
 
+def _next_inspection_date(data):
+    value = data.get("next_inspection_date", "")
+    if value == "":
+        return ""
+    try:
+        if not isinstance(value, str) or date.fromisoformat(value).isoformat() != value:
+            raise ValueError
+    except ValueError:
+        raise ValueError("Ingresa una fecha válida para la próxima inspección.") from None
+    return value
+
+
+def _apply_next_to_planning(connection, item_id, value, actor_id, now, inspection_id):
+    """Lleva la fecha de la próxima inspección a su fila de planificación."""
+    row = connection.execute(
+        "SELECT sheet_next_inspection, manual_next_inspection FROM planning_items WHERE id = ?",
+        (item_id,),
+    ).fetchone()
+    if not row:
+        return
+    before = row["sheet_next_inspection"] if row["manual_next_inspection"] is None \
+        else row["manual_next_inspection"]
+    if before == value:
+        return
+    # Si coincide con la planilla, deja de ser una corrección manual.
+    manual = None if value == row["sheet_next_inspection"] else value
+    connection.execute(
+        "UPDATE planning_items SET manual_next_inspection = ?, version = version + 1, "
+        "updated_at = ?, updated_by = ? WHERE id = ?",
+        (manual, now, actor_id, item_id),
+    )
+    day = lambda iso: f"{iso[8:10]}/{iso[5:7]}/{iso[0:4]}" if iso else ""
+    connection.execute(
+        "INSERT INTO planning_events (item_id, actor_id, action, created_at, details) "
+        "VALUES (?, ?, 'inspection_next', ?, ?)",
+        (item_id, actor_id, now, json.dumps(
+            {"next_inspection": [day(before), day(value)], "inspection": f"#{inspection_id}"},
+            ensure_ascii=False,
+        )),
+    )
+
+
 def _user_names(connection, *ids) -> dict:
     wanted = [value for value in ids if value]
     if not wanted:
@@ -250,6 +308,51 @@ def _checklist(data, size):
     if not isinstance(value, list) or len(value) != size or any(type(item) is not bool for item in value):
         raise ValueError(f"El checklist debe contener {size} casillas.")
     return json.dumps(value)
+
+
+def _send_mail_saved(data):
+    value = data.get("send_mail_saved", False)
+    if type(value) is not bool:
+        raise ValueError("Indica si el mail de envío quedó guardado.")
+    return int(value)
+
+
+def _aris_not_applicable(data):
+    value = data.get("aris_not_applicable", False)
+    if type(value) is not bool:
+        raise ValueError("Indica si el ingreso en ARIS aplica.")
+    return int(value)
+
+
+def _requirement(data):
+    text = data.get("requirement_text")
+    if not isinstance(text, str) or not 1 <= len(text.strip()) <= 1000:
+        raise ValueError("Escribe el requerimiento (máximo 1000 caracteres).")
+    due = data.get("due_date")
+    try:
+        if not isinstance(due, str) or date.fromisoformat(due).isoformat() != due:
+            raise ValueError
+    except ValueError:
+        raise ValueError("Ingresa un plazo válido para el requerimiento.") from None
+    return text.strip(), due
+
+
+def _post_checklist_started(connection, inspection):
+    """El checklist posterior se empezó si hay alguna casilla, el "No aplica" o un requerimiento."""
+    if any(json.loads(inspection["post_checklist"] or "[]")) or inspection["aris_not_applicable"]:
+        return True
+    return connection.execute(
+        "SELECT 1 FROM inspection_requirements WHERE inspection_id = ? LIMIT 1", (inspection["id"],),
+    ).fetchone() is not None
+
+
+def _requirement_visibility(user):
+    """Jefe de Inspección, Secretaría y admin ven todos; cada inspector, los que ingresó
+    y los de las inspecciones donde es líder o segundo."""
+    if _can_manage(user):
+        return "", ()
+    return (" WHERE (requirements.created_by = ? OR inspections.inspector_id = ? "
+            "OR inspections.second_inspector_id = ?)", (user["id"], user["id"], user["id"]))
 
 
 def _locomotion(data):
@@ -315,10 +418,38 @@ class InspectionRoutes:
                     "inspections.scheduled_time"
                 )
             ]
+            req_where, req_params = _requirement_visibility(self.current_user)
+            requirements = [
+                dict(row) for row in connection.execute(
+                    "SELECT requirements.id, requirements.inspection_id, requirements.text, "
+                    "requirements.due_date, requirements.created_at, requirements.resolved_at, "
+                    "requirements.created_by, "
+                    "users.display_name AS created_by_name, inspections.company_name, "
+                    "inspections.case_number, inspector.display_name AS inspector_name "
+                    "FROM inspection_requirements AS requirements "
+                    "JOIN inspections ON inspections.id = requirements.inspection_id "
+                    "JOIN workflow_users AS users ON users.id = requirements.created_by "
+                    "LEFT JOIN workflow_users AS inspector ON inspector.id = inspections.inspector_id"
+                    + req_where + " ORDER BY requirements.due_date, requirements.id", req_params,
+                )
+            ]
+            # Requerimientos sin resolver de cada inspección (sin importar quién los ve),
+            # para separar "Finalizadas" de "Finalizadas con requerimientos".
+            pending = dict(connection.execute(
+                "SELECT inspection_id, COUNT(*) FROM inspection_requirements "
+                "WHERE resolved_at = '' GROUP BY inspection_id"
+            ).fetchall())
+            for inspection in inspections:
+                inspection["requirements"] = []
+                inspection["pending_requirements"] = pending.get(inspection["id"], 0)
+            for item in requirements:
+                if item["inspection_id"] in by_id:
+                    by_id[item["inspection_id"]]["requirements"].append(item)
             self.send_json({
                 "current_user": self.current_user,
                 "can_create": managers,
                 "calendar": calendar,
+                "requirements": requirements,
                 "inspectors": inspectors,
                 "inspections": inspections,
             })
@@ -456,6 +587,82 @@ class InspectionRoutes:
         finally:
             connection.close()
 
+    def act_on_requirement(self, data):
+        """Resolver un requerimiento o extender su plazo, en cualquier etapa de la inspección."""
+        requirement_id = data.get("requirement_id")
+        action = data.get("action")
+        if type(requirement_id) is not int or requirement_id <= 0:
+            raise ValueError("El requerimiento no es válido.")
+        if action not in ("resolve", "extend", "reopen"):
+            raise ValueError("La acción indicada no es válida.")
+        user = self.current_user
+        connection = connect_db()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT requirements.*, inspections.inspector_id, inspections.stage "
+                "FROM inspection_requirements AS requirements "
+                "JOIN inspections ON inspections.id = requirements.inspection_id "
+                "WHERE requirements.id = ?", (requirement_id,),
+            ).fetchone()
+            if not row:
+                return self.send_error_json("No se encontró el requerimiento.", 404)
+            permitted = _is_chief(user) or (
+                user.get("workflow_role") == "inspeccion"
+                and user["id"] in (row["inspector_id"], row["created_by"])
+            )
+            if not permitted:
+                return self.send_error_json("No tienes permiso para modificar este requerimiento.", 403)
+            label = f"{row['text']} (plazo {row['due_date']})"
+            now = _now()
+            if action == "resolve":
+                if row["resolved_at"]:
+                    raise ValueError("El requerimiento ya está resuelto.")
+                connection.execute(
+                    "UPDATE inspection_requirements SET resolved_at = ?, resolved_by = ? WHERE id = ?",
+                    (now, user["id"], requirement_id),
+                )
+                changes = {"requirement": [label, f"{label} · resuelto"]}
+                event = "resolve_requirement"
+            elif action == "reopen":
+                if not row["resolved_at"]:
+                    raise ValueError("El requerimiento no está resuelto.")
+                connection.execute(
+                    "UPDATE inspection_requirements SET resolved_at = '', resolved_by = NULL WHERE id = ?",
+                    (requirement_id,),
+                )
+                changes = {"requirement": [f"{label} · resuelto", label]}
+                event = "reopen_requirement"
+            else:
+                if row["resolved_at"]:
+                    raise ValueError("El requerimiento ya está resuelto.")
+                due = data.get("due_date")
+                try:
+                    if not isinstance(due, str) or date.fromisoformat(due).isoformat() != due:
+                        raise ValueError
+                except ValueError:
+                    raise ValueError("Ingresa un plazo válido para el requerimiento.") from None
+                if due <= row["due_date"]:
+                    raise ValueError("El nuevo plazo debe ser posterior al actual.")
+                connection.execute(
+                    "UPDATE inspection_requirements SET due_date = ? WHERE id = ?", (due, requirement_id),
+                )
+                changes = {"requirement": [label, f"{row['text']} (plazo {due})"]}
+                event = "extend_requirement"
+            comment = data.get("comment", "")
+            if not isinstance(comment, str) or len(comment.strip()) > 1000:
+                raise ValueError("El comentario debe tener hasta 1000 caracteres.")
+            connection.execute(
+                "INSERT INTO inspection_events (inspection_id, actor_id, action, comment, "
+                "created_at, from_stage, to_stage, details) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (row["inspection_id"], user["id"], event, comment.strip(), now, row["stage"], row["stage"],
+                 json.dumps(changes, ensure_ascii=False)),
+            )
+            connection.commit()
+            self.send_json({"id": requirement_id, "action": action})
+        finally:
+            connection.close()
+
     def act_on_inspection(self, data):
         inspection_id = data.get("inspection_id")
         version = data.get("version")
@@ -477,6 +684,9 @@ class InspectionRoutes:
             "coordinate_driver": (None, None, "coordinator"),
             # El inspector cambia fecha, hora o lugar de una inspección ya agendada; no mueve la etapa.
             "reschedule": (None, None, "inspector"),
+            # Requerimientos del checklist posterior; no mueven la etapa.
+            "add_requirement": ("post_inspection", "post_inspection", "inspector"),
+            "remove_requirement": ("post_inspection", "post_inspection", "inspector"),
         }
         if type(inspection_id) is not int or inspection_id <= 0 or type(version) is not int or version < 0:
             raise ValueError("La inspección o su versión no es válida.")
@@ -510,15 +720,17 @@ class InspectionRoutes:
             if action == "set_entity":
                 source = target = inspection["stage"]
             if action == "reschedule":
-                if inspection["stage"] not in ("post_inspection", "chief_review", "send"):
-                    raise ValueError("Solo se puede re-coordinar una inspección agendada y no enviada.")
+                if inspection["stage"] != "post_inspection" or _post_checklist_started(connection, inspection):
+                    raise ValueError(
+                        "Solo se puede re-coordinar una inspección agendada antes de empezar el checklist posterior."
+                    )
                 source = target = inspection["stage"]
             if action == "coordinate_driver":
                 if inspection["driver_status"] not in ("pending", "coordinated"):
                     raise ValueError("Esta inspección no tiene un chofer por coordinar.")
                 source = target = inspection["stage"]
             if action == "save_checklist":
-                if inspection["stage"] not in ("pre_inspection", "post_inspection"):
+                if inspection["stage"] not in ("pre_inspection", "post_inspection", "send"):
                     raise ValueError("El checklist no se puede modificar en esta etapa.")
                 source = target = inspection["stage"]
             if inspection["stage"] != source or inspection["version"] != version:
@@ -526,16 +738,41 @@ class InspectionRoutes:
 
             updates = {"stage": target}
             comment = ""
+            extra_changes = {}
+            requirement = None
+            removed_requirement = None
             if action == "save_checklist":
                 if target == "pre_inspection":
                     updates["pre_checklist"] = _checklist(data, PRE_CHECKLIST_SIZE)
                     updates["locomotion"] = _locomotion(data)
                     updates.update(_driver_updates(inspection, updates["locomotion"], data))
+                elif target == "send":
+                    updates["send_mail_saved"] = _send_mail_saved(data)
+                    updates["next_inspection_date"] = _next_inspection_date(data)
                 else:
                     updates["post_checklist"] = _checklist(data, POST_CHECKLIST_SIZE)
+                    updates["aris_not_applicable"] = _aris_not_applicable(data)
                 if all(inspection[key] == value for key, value in updates.items()):
                     connection.rollback()
                     return self.send_json({"id": inspection_id, "stage": target, "version": version})
+            elif action == "add_requirement":
+                requirement = _requirement(data)
+                extra_changes = {"requirement": ["", f"{requirement[0]} (plazo {requirement[1]})"]}
+            elif action == "remove_requirement":
+                requirement_id = data.get("requirement_id")
+                if type(requirement_id) is not int or requirement_id <= 0:
+                    raise ValueError("El requerimiento no es válido.")
+                row = connection.execute(
+                    "SELECT id, text, due_date, resolved_at FROM inspection_requirements "
+                    "WHERE id = ? AND inspection_id = ?",
+                    (requirement_id, inspection_id),
+                ).fetchone()
+                if not row:
+                    raise ValueError("No se encontró el requerimiento.")
+                if row["resolved_at"]:
+                    raise ValueError("Un requerimiento resuelto no se puede quitar; reábrelo primero.")
+                removed_requirement = row["id"]
+                extra_changes = {"requirement": [f"{row['text']} (plazo {row['due_date']})", ""]}
             elif action == "reschedule":
                 updates.update(_schedule(data))
                 if inspection["locomotion"] == "auto_miem":
@@ -586,6 +823,17 @@ class InspectionRoutes:
                             connection, planning_row["id"], new_entity, user["id"], _now(),
                             inspection_id,
                         )
+            elif action == "send":
+                # Checklist de envío: obligatorio antes de registrar el envío.
+                updates["send_mail_saved"] = _send_mail_saved(data)
+                updates["next_inspection_date"] = _next_inspection_date(data)
+                missing = []
+                if not updates["send_mail_saved"]:
+                    missing.append("marcar «Mail de envío guardado en línea de tiempo»")
+                if not updates["next_inspection_date"]:
+                    missing.append("cargar la fecha de la próxima inspección")
+                if missing:
+                    raise ValueError("Para registrar el envío falta: " + "; ".join(missing) + ".")
             elif action in ("complete_pre", "complete_post"):
                 if action == "complete_pre":
                     updates["pre_checklist"] = _checklist(data, PRE_CHECKLIST_SIZE)
@@ -593,6 +841,12 @@ class InspectionRoutes:
                     updates.update(_driver_updates(inspection, updates["locomotion"], data))
                 else:
                     updates["post_checklist"] = _checklist(data, POST_CHECKLIST_SIZE)
+                    updates["aris_not_applicable"] = _aris_not_applicable(data)
+                    done = json.loads(updates["post_checklist"])
+                    done[2] = done[2] or bool(updates["aris_not_applicable"])
+                    missing = [f"marcar «{name}»" for name, ok in zip(POST_CHECKLIST_ITEMS, done) if not ok]
+                    if missing:
+                        raise ValueError("Para enviar al jefe falta: " + "; ".join(missing) + ".")
                 if action == "complete_pre":
                     missing = [f"marcar «{name}»" for name, done in zip(PRE_CHECKLIST_ITEMS, json.loads(updates["pre_checklist"]))
                                if not done]
@@ -619,7 +873,21 @@ class InspectionRoutes:
                 if key in updates and inspection[key] != updates[key]:
                     names = _user_names(connection, inspection[key], updates[key])
                     changes[label] = [names.get(inspection[key], ""), names.get(updates[key], "")]
+            changes.update(extra_changes)
             now = _now()
+            # La fecha pasa a la planificación recién al registrar el envío (no en cada autoguardado).
+            next_date = updates.get("next_inspection_date")
+            if action == "send" and next_date and inspection["planning_item_id"]:
+                _apply_next_to_planning(connection, inspection["planning_item_id"], next_date,
+                                        user["id"], now, inspection_id)
+            if requirement:
+                connection.execute(
+                    "INSERT INTO inspection_requirements (inspection_id, text, due_date, created_by, "
+                    "created_at) VALUES (?, ?, ?, ?, ?)",
+                    (inspection_id, requirement[0], requirement[1], user["id"], now),
+                )
+            if removed_requirement:
+                connection.execute("DELETE FROM inspection_requirements WHERE id = ?", (removed_requirement,))
             assignments = ", ".join(f"{key} = ?" for key in updates)
             connection.execute(
                 f"UPDATE inspections SET {assignments}, updated_at = ?, version = version + 1 "
@@ -671,7 +939,9 @@ class InspectionRoutes:
             ("Checklist previo", "pre_checklist"), ("Locomoción", "locomotion"),
             ("Chofer", "driver_status"), ("Chofer asignado", "driver_name"),
             ("Hora de salida", "departure_time"), ("Hora aprox. de llegada", "arrival_time"),
-            ("Checklist posterior", "post_checklist"),
+            ("Checklist posterior", "post_checklist"), ("ARIS no aplica", "aris_not_applicable"),
+            ("Próxima inspección", "next_inspection_date"),
+            ("Mail de envío guardado", "send_mail_saved"),
             ("Creada por", "created_by_name"), ("Creada (UTC)", "created_at"),
             ("Última modificación (UTC)", "updated_at"),
         ]
@@ -689,6 +959,8 @@ class InspectionRoutes:
             values["request_type"] = REQUEST_TYPES.get(values["request_type"], values["request_type"])
             values["pre_checklist"] = _checklist_summary(values["pre_checklist"])
             values["post_checklist"] = _checklist_summary(values["post_checklist"])
+            values["aris_not_applicable"] = "Sí" if values["aris_not_applicable"] else "No"
+            values["send_mail_saved"] = "Sí" if values["send_mail_saved"] else "No"
             values["locomotion"] = LOCOMOTION_OPTIONS.get(values["locomotion"], values["locomotion"])
             values["driver_status"] = DRIVER_STATUS.get(values["driver_status"], values["driver_status"])
             return values
